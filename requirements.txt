@@ -1,0 +1,5 @@
+pandas>=2.0
+numpy>=1.24
+tushare>=1.4
+pyarrow>=14.0
+akshare>=1.12

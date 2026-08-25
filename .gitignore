@@ -1,0 +1,24 @@
+# 数据产物（体积大，且可由脚本重新生成）
+data/
+
+# 运行日志与进程文件
+logs/
+*.pid
+nohup.out
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 密钥与本地环境
+.env
+
+# 系统文件
+.DS_Store
+
+# 编辑器
+.idea/
+.vscode/

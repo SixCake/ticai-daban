@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>题材打板监控台</title>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--card2:#1c2330;--border:#2d333b;
+    --txt:#e6edf3;--dim:#8b949e;--red:#ff4d4f;--green:#3fb950;
+    --gold:#f0b90b;--blue:#58a6ff;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--txt);
+    font:14px/1.5 "PingFang SC","Microsoft YaHei",monospace;padding:16px;}
+  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+    padding-bottom:12px;border-bottom:1px solid var(--border);}
+  h1{font-size:20px;letter-spacing:2px;}
+  h1 span{color:var(--gold);}
+  .tabs{display:flex;gap:8px;}
+  .tab{padding:6px 18px;border:1px solid var(--border);border-radius:6px;
+    cursor:pointer;background:var(--card);color:var(--dim);}
+  .tab.active{background:var(--gold);color:#000;font-weight:700;border-color:var(--gold);}
+  .status{margin-left:auto;color:var(--dim);font-size:12px;}
+  .status .dot{display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:var(--green);margin-right:4px;}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+    gap:10px;margin:14px 0;}
+  .card{background:var(--card);border:1px solid var(--border);
+    border-radius:8px;padding:10px 12px;}
+  .card .k{color:var(--dim);font-size:12px;}
+  .card .v{font-size:22px;font-weight:700;margin-top:2px;}
+  .card .v.warn{color:var(--red);}
+  section{margin-top:18px;}
+  h2{font-size:15px;color:var(--gold);margin-bottom:8px;
+    border-left:3px solid var(--gold);padding-left:8px;}
+  table{width:100%;border-collapse:collapse;background:var(--card);
+    border-radius:8px;overflow:hidden;font-size:13px;}
+  th{background:var(--card2);color:var(--dim);font-weight:400;
+    padding:7px 10px;text-align:left;position:sticky;top:0;}
+  td{padding:6px 10px;border-top:1px solid var(--border);}
+  tr:hover td{background:#21262d;}
+  .scroll{max-height:420px;overflow-y:auto;border-radius:8px;}
+  .up{color:var(--red);}.down{color:var(--green);}.flat{color:var(--dim);}
+  .badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:12px;}
+  .b-hot{background:#4d1f00;color:#ff9d00;}
+  .b-age{background:#0d2d4d;color:var(--blue);}
+  .b-h{background:#3d1440;color:#e060ff;}
+  .cand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:10px;}
+  .cand{background:linear-gradient(160deg,#1d2735,#161b22);
+    border:1px solid var(--gold);border-radius:10px;padding:12px;
+    animation:pulse 2.4s infinite;}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(240,185,11,.35)}
+    50%{box-shadow:0 0 14px 2px rgba(240,185,11,.25)}}
+  .cand .nm{font-size:17px;font-weight:700;}
+  .cand .meta{color:var(--dim);font-size:12px;margin-top:6px;
+    display:grid;grid-template-columns:1fr 1fr;gap:3px;}
+  .cand .meta b{color:var(--txt);font-weight:400;}
+  .empty{color:var(--dim);padding:24px;text-align:center;background:var(--card);
+    border-radius:8px;border:1px dashed var(--border);}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;}
+  .chip{background:var(--card);border:1px solid var(--border);
+    border-radius:14px;padding:3px 10px;font-size:12px;color:var(--dim);}
+  input[type=date]{background:var(--card);color:var(--txt);
+    border:1px solid var(--border);border-radius:6px;padding:6px 10px;}
+  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;}
+  button{background:var(--gold);color:#000;border:none;border-radius:6px;
+    padding:7px 16px;font-weight:700;cursor:pointer;}
+  .hide{display:none;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  @media(max-width:900px){.grid2{grid-template-columns:1fr;}}
+  tr.trow{cursor:pointer;}
+  tr.trow td:nth-child(2){color:var(--txt);}
+  tr.t-detail td{background:#0a0e14;padding:10px 14px;}
+  table.sub{background:var(--card2);font-size:12px;border:1px solid var(--border);}
+  table.sub th{background:#232b3a;}
+  .hint{color:var(--dim);font-size:12px;font-weight:400;margin-left:8px;}
+  .tchip{display:inline-block;margin-left:4px;padding:0 6px;border-radius:8px;
+    font-size:11px;background:#0d2d4d;color:var(--blue);}
+  .b-prim{background:#4d3800;color:var(--gold);}
+  .b-touch{background:#20262e;color:var(--dim);}
+  .b-leader{background:#5c3d00;color:#ffd666;border:1px solid var(--gold);}
+  .b-lb{background:#3d1440;color:#e060ff;}
+  .b-bz{background:#2d1a4d;color:#b37feb;}
+  .b-res{background:#1f2a36;color:var(--dim);}
+  .b-zj{background:#00304d;color:#69c0ff;}
+  /* 预警雷达观察增强 */
+  .spd-hot{color:#ff7875;font-weight:700;}
+  tr.row-hot td{background:rgba(255,77,79,.08);}
+  tr.row-warm td{background:rgba(240,185,11,.05);}
+  tr.r-hi td{background:rgba(255,77,79,.11);}
+  tr.r-md td{background:rgba(240,185,11,.07);}
+  tr:hover td{background:#21262d;}
+  .b-new{background:#4d1200;color:#ffa39e;border:1px solid #a8071a;}
+  .pwrap{position:relative;display:inline-block;min-width:78px;padding:1px 8px;
+    border-radius:4px;overflow:hidden;white-space:nowrap;}
+  .pfill{position:absolute;left:0;top:0;bottom:0;background:rgba(255,77,79,.28);}
+  .pwrap b,.pwrap span{position:relative;}
+  .dist-near{color:#ff7875;font-weight:700;animation:blink 1.2s infinite;}
+  @keyframes blink{50%{opacity:.4}}
+  tr.flash td{animation:flashbg 2.4s ease-out;}
+  @keyframes flashbg{0%{background:rgba(255,77,79,.45)}100%{background:transparent}}
+</style>
+</head>
+<body>
+<header>
+  <h1>题材打板<span>监控台</span></h1>
+  <div class="tabs">
+    <div class="tab active" id="tab-live" onclick="switchTab('live')">盘中实时</div>
+    <div class="tab" id="tab-review" onclick="switchTab('review')">复盘梳理</div>
+    <div class="tab" id="tab-radar" onclick="switchTab('radar')">预警雷达</div>
+  </div>
+  <div class="status" id="status"><span class="dot"></span>加载中…</div>
+</header>
+
+<!-- ========== 盘中实时 ========== -->
+<div id="page-live">
+  <div class="cards" id="live-cards"></div>
+  <section>
+    <h2>现实格候选 — 大热点×炸板回封×午前×炸板≤3</h2>
+    <div id="live-cands"></div>
+  </section>
+  <div class="grid2">
+    <section>
+      <h2>题材天梯（独占归属）<span class="hint">点击题材展开关联股票（独占+触及）</span></h2>
+      <div class="scroll" id="live-themes"></div>
+    </section>
+    <section>
+      <h2>连板天梯（2板+）</h2>
+      <div class="scroll" id="live-ladder"></div>
+    </section>
+  </div>
+  <section>
+    <h2>涨停池全明细</h2>
+    <div class="scroll" id="live-pool"></div>
+  </section>
+  <section>
+    <h2>今日炸板出池（状态机追踪）</h2>
+    <div class="chips" id="live-exits"></div>
+  </section>
+</div>
+
+<!-- ========== 复盘梳理 ========== -->
+<div id="page-review" class="hide">
+  <div class="toolbar">
+    <input type="date" id="rv-date">
+    <button onclick="loadReview()">加载复盘</button>
+    <span id="rv-stats" style="color:var(--dim);font-size:12px;"></span>
+  </div>
+  <div class="cards" id="rv-cards"></div>
+  <section>
+    <h2>当日现实格命中 → T+1兑现</h2>
+    <div id="rv-rc"></div>
+  </section>
+  <div class="grid2">
+    <section>
+      <h2>题材天梯<span class="hint">点击题材展开关联股票（独占+触及）</span></h2>
+      <div class="scroll" id="rv-themes"></div>
+    </section>
+    <section>
+      <h2>连板天梯（2板+，含T+1兑现）</h2>
+      <div class="scroll" id="rv-ladder"></div>
+    </section>
+  </div>
+  <section>
+    <h2>前一交易日现实格兑现验证</h2>
+    <div id="rv-prev"></div>
+  </section>
+  <section>
+    <h2>涨停池全明细</h2>
+    <div class="scroll" id="rv-pool"></div>
+  </section>
+</div>
+
+<!-- ========== 预警雷达 ========== -->
+<div id="page-radar" class="hide">
+  <div class="cards" id="rd-cards"></div>
+  <section>
+    <h2>外部热点对照（东财概念板块涨幅榜）<span class="hint" id="rd-ts"></span></h2>
+    <div class="chips" id="rd-ext"></div>
+  </section>
+  <div class="grid2">
+    <section>
+      <h2>题材热度排名（自算口径）<span class="hint">点击题材展开领涨成分 · ▲▼为热度较上轮变化 · 红底前3/金底前8</span></h2>
+      <div class="scroll" id="rd-themes"></div>
+    </section>
+    <section>
+      <h2>涨停概率排名（未板）<span class="hint">启发式v0校准中 · 「新」=新晋上榜 · 距板≤1.5%闪烁提醒</span></h2>
+      <div class="scroll" id="rd-stocks"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const fmtT=t=>t?t.slice(0,2)+':'+t.slice(2,4)+':'+t.slice(4,6):'-';
+const fmtAmt=v=>v>=1e8?(v/1e8).toFixed(2)+'亿':v>=1e4?(v/1e4).toFixed(0)+'万':v.toFixed(0);
+const retCls=r=>r==null?'flat':r>0?'up':r<0?'down':'flat';
+const retTxt=r=>r==null?'—':(r>0?'+':'')+r.toFixed(2)+'%';
+const ROLE_CLS={'龙头':'b-leader','连板':'b-lb','补涨':'b-bz','共振':'b-res','中军':'b-zj'};
+const roleBadges=p=>(p.roles||[]).map(r=>
+  `<span class="badge ${ROLE_CLS[r]||'b-res'}">${r}</span>`).join(' ');
+const zjChip=t=>t.zhongjun?` <span class="badge b-zj">中军 ${t.zhongjun.name} +${t.zhongjun.pct.toFixed(1)}%</span>`:'';
+
+function switchTab(t){
+  $('tab-live').classList.toggle('active',t==='live');
+  $('tab-review').classList.toggle('active',t==='review');
+  $('tab-radar').classList.toggle('active',t==='radar');
+  $('page-live').classList.toggle('hide',t!=='live');
+  $('page-review').classList.toggle('hide',t!=='review');
+  $('page-radar').classList.toggle('hide',t!=='radar');
+  if(t==='review'&&!$('rv-date').value)initReview();
+  if(t==='radar')refreshRadar();
+}
+
+function cards(el,s){
+  el.innerHTML=Object.entries(s).map(([k,v])=>
+    `<div class="card"><div class="k">${k}</div><div class="v ${v.warn?'warn':''}">${v.v}</div></div>`).join('');
+}
+
+/* ---------- 题材天梯点击展开关联股票 ---------- */
+let LIVE=null,RV=null;
+const openTheme={live:null,review:null};
+function themeStocks(which,name){
+  const d=which==='live'?LIVE:RV;
+  const ps=d.pool.filter(p=>(p.themes||[p.theme]).includes(name))
+    .sort((a,b)=>(b.theme===name)-(a.theme===name)||b.height-a.height||b.fd_amount-a.fd_amount);
+  if(!ps.length)return '<div class="empty">无关联股票</div>';
+  const t1=which==='review'?'<th>T+1开盘</th>':'';
+  return `<table class="sub"><tr><th>股票</th><th>归属</th><th>连板</th><th>炸板</th><th>首封</th><th>末封</th><th>封单</th><th>行业</th>${t1}</tr>
+    ${ps.map(p=>`<tr><td>${p.name} ${roleBadges(p)}</td>
+      <td>${p.theme===name?'<span class="badge b-prim">独占</span>':'<span class="badge b-touch">触及</span>'}</td>
+      <td>${p.height>=2?`<span class="badge b-h">${p.height}</span>`:'首板'}</td>
+      <td>${p.open_times}</td><td>${fmtT(p.first_time)}</td><td>${fmtT(p.last_time)}</td>
+      <td>${fmtAmt(p.fd_amount)}</td><td>${p.industry}</td>${which==='review'?`<td class="${retCls(p.next_open_ret)}">${retTxt(p.next_open_ret)}</td>`:''}</tr>`).join('')}</table>`;
+}
+function themeCell(p){
+  const extra=(p.themes||[]).filter(n=>n!==p.theme);
+  const chips=extra.slice(0,3).map(n=>`<span class="tchip">${n}</span>`).join('');
+  const more=extra.length>3?`<span class="tchip">+${extra.length-3}</span>`:'';
+  return `${p.theme}${p.theme_cnt?` (${p.theme_cnt})`:''}${chips}${more}`;
+}
+function themeTable(which){
+  const d=which==='live'?LIVE:RV;
+  if(!d)return;
+  const open=openTheme[which];
+  const themes=which==='live'?d.themes.slice(0,25):d.themes;
+  const ncols=7;
+  const rows=themes.map((t,i)=>{
+    const isopen=open===t.name;
+    let h=`<tr class="trow" onclick="toggleTheme('${which}',${i})"><td>${i+1}</td>
+      <td>${isopen?'▾':'▸'} ${t.name} ${t.zt_cnt>=8?'<span class="badge b-hot">热点</span>':''}</td>
+      <td><b>${t.zt_cnt}</b></td><td>${t.zt_cnt_raw??''}</td>`;
+    h+=`<td>${t.max_height}</td><td><span class="badge b-age">${t.theme_age}天</span></td>
+      <td>${t.leader_name} ${t.leader_height}板${zjChip(t)}</td></tr>`;
+    if(isopen)h+=`<tr class="t-detail"><td colspan="${ncols}">${themeStocks(which,t.name)}</td></tr>`;
+    return h;
+  }).join('');
+  const head='<tr><th>#</th><th>题材</th><th>家数</th><th>触及</th><th>高度</th><th>年龄</th><th>龙头</th></tr>';
+  $(which==='live'?'live-themes':'rv-themes').innerHTML=`<table>${head}${rows}</table>`;
+}
+function toggleTheme(which,i){
+  const d=which==='live'?LIVE:RV;
+  const name=d.themes[i].name;
+  openTheme[which]=openTheme[which]===name?null:name;
+  themeTable(which);
+}
+
+/* ---------- 盘中实时 ---------- */
+let prevCands=new Set();
+async function refreshLive(){
+  try{
+    const r=await fetch('/api/live');const d=await r.json();
+    if(d.error){$('status').innerHTML='⚠ '+d.error;return;}
+    LIVE=d;
+    const s=d.sentiment;
+    $('status').innerHTML=`<span class="dot"></span>${d.date} ${d.status==='live'?'盘中':'收盘快照'} · 更新 ${d.ts} · 30s自动刷新`;
+    cards($('live-cards'),{
+      '涨停家数':{v:s.zt_count},'炸板出池':{v:s.exit_count,warn:s.exit_count>15},
+      '断板率':{v:(s.broken_rate*100).toFixed(0)+'%',warn:s.broken_rate>0.3},
+      '最高连板':{v:s.max_height},'2板以上':{v:s.ladder_2plus},
+      '现实格候选':{v:s.candidates}});
+    // 候选
+    const cs=d.candidates;
+    $('live-cands').innerHTML=cs.length?`<div class="cand-grid">${cs.map(c=>`
+      <div class="cand">
+        <div class="nm">${c.name} <span class="badge b-h">${c.height}板</span>
+          <span class="badge b-hot">${c.theme} ${c.theme_cnt}家</span></div>
+        <div class="meta">
+          <span>炸板 <b>${c.open_times}次</b></span><span>首封 <b>${fmtT(c.first_time)}</b></span>
+          <span>回封 <b>${fmtT(c.last_time)}</b></span><span>封单 <b>${fmtAmt(c.fd_amount)}</b></span>
+          <span>流通 <b>${fmtAmt(c.float_mv)}</b></span><span>行业 <b>${c.industry}</b></span>
+        </div>
+      </div>`).join('')}</div>`
+      :'<div class="empty">暂无现实格候选（需大热点≥8家 + 炸板回封 + 午前 + 炸板≤3）</div>';
+    prevCands=new Set(cs.map(c=>c.ts_code));
+    // 题材天梯
+    themeTable('live');
+    // 连板天梯
+    const lb=d.pool.filter(p=>p.height>=2);
+    $('live-ladder').innerHTML=lb.length?`<table><tr><th>股票</th><th>连板</th><th>题材</th><th>炸板</th><th>首封</th><th>封单</th></tr>
+      ${lb.map(p=>`<tr><td>${p.name} ${roleBadges(p)}</td><td><span class="badge b-h">${p.height}</span></td>
+        <td>${themeCell(p)}</td><td>${p.open_times}</td><td>${fmtT(p.first_time)}</td>
+        <td>${fmtAmt(p.fd_amount)}</td></tr>`).join('')}</table>`
+      :'<div class="empty">无2板以上</div>';
+    // 涨停池
+    $('live-pool').innerHTML=`<table><tr><th>股票</th><th>连板</th><th>题材(家数)</th><th>炸板</th><th>首封</th><th>末封</th><th>封单</th><th>行业</th></tr>
+      ${d.pool.map(p=>`<tr><td>${p.name} ${roleBadges(p)}</td>
+        <td>${p.height>=2?`<span class="badge b-h">${p.height}</span>`:'首板'}</td>
+        <td>${themeCell(p)}</td>
+        <td>${p.open_times}</td><td>${fmtT(p.first_time)}</td><td>${fmtT(p.last_time)}</td>
+        <td>${fmtAmt(p.fd_amount)}</td><td>${p.industry}</td></tr>`).join('')}</table>`;
+    // 炸板出池
+    $('live-exits').innerHTML=d.exits.length?d.exits.map(e=>
+      `<span class="chip">${e.ts_code} ${fmtT(e.time)}出池</span>`).join('')
+      :'<span class="chip">今日暂无出池记录</span>';
+  }catch(e){$('status').innerHTML='⚠ 服务未就绪 '+e.message;}
+}
+
+/* ---------- 复盘 ---------- */
+async function initReview(){
+  const r=await fetch('/api/dates');const d=await r.json();
+  if(d.dates&&d.dates.length){
+    const s=d.dates[0];
+    $('rv-date').value=s.slice(0,4)+'-'+s.slice(4,6)+'-'+s.slice(6,8);
+    loadReview();
+  }
+}
+async function loadReview(){
+  const v=$('rv-date').value.replace(/-/g,'');
+  if(!v)return;
+  const r=await fetch('/api/review?date='+v);const d=await r.json();
+  if(d.error){alert(d.error);return;}
+  RV=d;
+  const s=d.sentiment;
+  cards($('rv-cards'),{
+    '涨停家数':{v:s.zt_count},'一字板':{v:s.yizi_count},
+    '炸板回封':{v:s.broken_board},'最高连板':{v:s.max_height},
+    '2板以上':{v:s.ladder_2plus}});
+  if(d.stats&&d.stats.hist_n)
+    $('rv-stats').textContent=`现实格历史: ${d.stats.hist_n}笔 均值${d.stats.hist_mean}% · 近期${d.stats.recent_n}笔 ${d.stats.recent_mean}%`;
+  // 现实格命中
+  const rc=d.reality_cells||[];
+  $('rv-rc').innerHTML=rc.length?`<table><tr><th>股票</th><th>连板</th><th>题材(家数)</th><th>炸板</th><th>回封</th><th>封单</th><th>T+1开盘</th><th>T+1收盘</th></tr>
+    ${rc.map(c=>`<tr><td>${c.name}</td><td><span class="badge b-h">${c.height}</span></td>
+      <td>${c.theme} (${c.theme_cnt})</td><td>${c.open_times}</td><td>${fmtT(c.last_time)}</td>
+      <td>${fmtAmt(c.fd_amount)}</td>
+      <td class="${retCls(c.next_open_ret)}"><b>${retTxt(c.next_open_ret)}</b></td>
+      <td class="${retCls(c.next_close_ret)}">${retTxt(c.next_close_ret)}</td></tr>`).join('')}</table>`
+    :'<div class="empty">当日无现实格命中</div>';
+  // 题材天梯
+  themeTable('review');
+  // 连板天梯
+  $('rv-ladder').innerHTML=`<table><tr><th>股票</th><th>连板</th><th>题材</th><th>炸板</th><th>封单</th><th>T+1</th></tr>
+    ${d.ladder_stocks.map(p=>`<tr><td>${p.name} ${roleBadges(p)}</td><td><span class="badge b-h">${p.height}</span></td>
+      <td>${themeCell(p)}</td><td>${p.open_times}</td><td>${fmtAmt(p.fd_amount)}</td>
+      <td class="${retCls(p.next_open_ret)}"><b>${retTxt(p.next_open_ret)}</b></td></tr>`).join('')}</table>`;
+  // 前一日现实格验证
+  const pv=d.prev_reality_cells||[];
+  $('rv-prev').innerHTML=pv.length?`<table><tr><th>股票</th><th>题材</th><th>信号日</th><th>T+1开盘兑现</th></tr>
+    ${pv.map(c=>`<tr><td>${c.name}</td><td>${c.theme}</td><td>${c.date}</td>
+      <td class="${retCls(c.next_open_ret)}"><b>${retTxt(c.next_open_ret)}</b></td></tr>`).join('')}</table>`
+    :'<div class="empty">前一交易日无现实格信号</div>';
+  // 涨停池明细
+  $('rv-pool').innerHTML=`<table><tr><th>股票</th><th>连板</th><th>题材(家数)</th><th>炸板</th><th>首封</th><th>末封</th><th>封单</th><th>一字</th><th>T+1</th></tr>
+    ${d.pool.map(p=>`<tr><td>${p.name} ${roleBadges(p)}</td>
+      <td>${p.height>=2?`<span class="badge b-h">${p.height}</span>`:'首板'}</td>
+      <td>${themeCell(p)}</td>
+      <td>${p.open_times}</td><td>${fmtT(p.first_time)}</td><td>${fmtT(p.last_time)}</td>
+      <td>${fmtAmt(p.fd_amount)}</td><td>${p.is_yizi?'✓':''}</td>
+      <td class="${retCls(p.next_open_ret)}">${retTxt(p.next_open_ret)}</td></tr>`).join('')}</table>`;
+}
+
+/* ---------- 预警雷达 ---------- */
+const spdCls=v=>v>=0.5?'up spd-hot':v>0?'up':v<0?'down':'flat';
+const spdTxt=v=>(v>0?'+':'')+v.toFixed(2);
+const heatRow=i=>i<3?'row-hot':i<8?'row-warm':'';
+const probRow=i=>i<3?'r-hi':i<10?'r-md':'';
+let RD=null,prevRd=null,openRdTheme=null;
+function toggleRdTheme(i){
+  if(!RD)return;
+  const n=RD.themes[i].name;
+  openRdTheme=openRdTheme===n?null:n;
+  renderRadar();
+}
+const rdThemeStocks=t=>t.top&&t.top.length?`<table class="sub">
+  <tr><th>领涨成分</th><th>涨幅</th><th>涨停概率</th><th>状态</th></tr>
+  ${t.top.map(s=>`<tr><td>${s.name}</td><td class="up">${s.pct}%</td>
+    <td>${s.prob!=null?`<b class="${s.prob>=0.3?'up spd-hot':''}">${(s.prob*100).toFixed(0)}%</b>`:'-'}</td>
+    <td>${s.near?'<span class="badge b-new">触板/已板</span>':''}</td></tr>`).join('')}</table>`
+  :'<div class="empty">无成分股行情</div>';
+function renderRadar(){
+  const d=RD;if(!d)return;
+  $('rd-ts').textContent=`更新 ${d.ts} · 20s全扫 · 概率为启发式v0(校准中)`;
+  const nMd=d.stocks.filter(s=>s.prob>=0.3).length;
+  const nHi=d.stocks.filter(s=>s.prob>=0.5).length;
+  cards($('rd-cards'),{
+    '热点题材(热度≥12)':{v:d.n_hot??'-',warn:(d.n_hot||0)>=15},
+    '冲板候选(概率≥30%)':{v:nMd,warn:nMd>0},
+    '高概率(≥50%)':{v:nHi,warn:nHi>0},
+    '触板/已板':{v:d.near_cnt??'-'}});
+  $('rd-ext').innerHTML=d.external.length?d.external.map(b=>
+    `<span class="chip">${b.name} <b class="${b.pct>=2?'up spd-hot':'up'}">+${b.pct}%</b> 速${b.speed} 涨${b.up}/跌${b.down} 领 ${b.leader}</span>`).join('')
+    :'<span class="chip">东财接口暂不可用（自算口径不受影响）</span>';
+  const prevT=(prevRd&&prevRd.themes)||{};
+  const prevS=(prevRd&&prevRd.stocks)||{};
+  const ready=!!prevRd;
+  $('rd-themes').innerHTML=`<table><tr><th>#</th><th>题材</th><th>热度</th><th>成分</th><th>密度≥5%</th><th>头部超额</th><th>涨速3m</th><th>量比</th><th>涨停</th><th>东财对照</th></tr>
+    ${d.themes.map((t,i)=>{
+      const dh=ready&&prevT[t.name]!=null?t.heat-prevT[t.name]:null;
+      const arrow=dh==null?'':dh>=1?` <span class="up">▲${dh.toFixed(1)}</span>`
+        :dh<=-1?` <span class="down">▼${(-dh).toFixed(1)}</span>`:'';
+      const isopen=openRdTheme===t.name;
+      let h=`<tr class="trow ${heatRow(i)}" onclick="toggleRdTheme(${i})"><td>${i+1}</td>
+        <td>${isopen?'▾':'▸'} ${t.name}</td><td><b>${t.heat}</b>${arrow}</td>
+        <td>${t.nmem}</td><td>${t.dens5!=null?(t.dens5*100).toFixed(0)+'%':t.n5}</td>
+        <td class="up">${t.headx!=null?'+'+t.headx+'%':t.top10+'%'}</td>
+        <td class="${spdCls(t.s3)}">${spdTxt(t.s3)}</td><td>${t.vr}</td>
+        <td>${t.zt?`<b class="up">${t.zt}</b>`:0}</td>
+        <td>${t.em?`<span class="tchip">${t.em.pct}%</span>`:'-'}</td></tr>`;
+      if(isopen)h+=`<tr class="t-detail"><td colspan="10">${rdThemeStocks(t)}</td></tr>`;
+      return h;}).join('')}</table>`;
+  $('rd-stocks').innerHTML=`<table><tr><th>#</th><th>股票</th><th>概率</th><th>涨幅</th><th>1m</th><th>3m</th><th>5m</th><th>量比</th><th>距板</th><th>题材</th></tr>
+    ${d.stocks.map((s,i)=>{
+      const pv=ready?prevS[s.ts_code]:null;
+      const isNew=ready&&pv==null&&s.prob>=0.15;
+      const dpr=ready&&pv!=null?s.prob-pv:null;
+      const mark=isNew?' <span class="badge b-new">新</span>'
+        :dpr!=null&&dpr>=0.05?` <span class="up">▲${(dpr*100).toFixed(0)}</span>`
+        :dpr!=null&&dpr<=-0.05?` <span class="down">▼${(-dpr*100).toFixed(0)}</span>`:'';
+      const flash=isNew&&s.prob>=0.3?' flash':'';
+      return `<tr class="${probRow(i)}${flash}"><td>${i+1}</td><td>${s.name}</td>
+        <td><div class="pwrap"><div class="pfill" style="width:${Math.min(s.prob*100,100)}%"></div><b>${(s.prob*100).toFixed(0)}%</b>${mark}</div></td>
+        <td class="up">${s.pct}%</td>
+        <td class="${spdCls(s.s1)}">${spdTxt(s.s1)}</td>
+        <td class="${spdCls(s.s3)}">${spdTxt(s.s3)}</td>
+        <td class="${spdCls(s.s5)}">${spdTxt(s.s5)}</td>
+        <td>${s.vr}</td><td class="${s.dist<=1.5?'dist-near':''}">${s.dist}%</td>
+        <td>${s.theme}</td></tr>`;}).join('')}</table>`;
+}
+async function refreshRadar(){
+  try{
+    const r=await fetch('/api/radar');const d=await r.json();
+    if(d.error){$('rd-ts').textContent='⚠ '+d.error;return;}
+    RD=d;renderRadar();
+    prevRd={themes:Object.fromEntries(d.themes.map(t=>[t.name,t.heat])),
+            stocks:Object.fromEntries(d.stocks.map(s=>[s.ts_code,s.prob]))};
+  }catch(e){$('rd-ts').textContent='⚠ 雷达未就绪 '+e.message;}
+}
+setInterval(refreshRadar,20000);
+
+refreshLive();
+setInterval(refreshLive,30000);
+</script>
+</body>
+</html>
