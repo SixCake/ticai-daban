@@ -17,4 +17,6 @@ echo "==> 重建题材日度快照"
 "$PY" build/theme_daily.py
 echo "==> 雷达轨迹标注(挂涨停结果/首封时间)"
 "$PY" apps/label_radar.py
+echo "==> 涨停/触板标的1分钟线采集(东财当日深度, 供研究06)"
+"$PY" collect/fetch_zt_minute.py --max-days 2 || echo "分钟线采集失败(不影响主流程)"
 echo "==> 完成"

@@ -22,3 +22,6 @@ venv/
 # 编辑器
 .idea/
 .vscode/
+
+# 研究中间产物
+research/out/
