@@ -8,7 +8,7 @@
   push2delay —— 仅当日深度, 兜底
 涨停价:   tushare stk_limit 按日全市场一次
 
-输出: data/minutes/zt_minute_YYYYMMDD.parquet
+输出: limitup.zt_minute (data/limitup/1m/zt_minute_YYYYMMDD.parquet)
   date ts_code name grp(sealed/zb) height open_times first_time zb_times
   is_yizi is_st float_mv turnover_ratio fd_amount
   t(HHMM) open high low close vol(手) amount(元) limit_px
@@ -41,10 +41,10 @@ requests.api.request = _request_with_timeout
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from config import DATA  # noqa: E402
+from config import DATA  # noqa: E402  (live/latest.json 不入目录)
 from core.codes import ts_code_of  # noqa: E402
+from datastore import load, path_of  # noqa: E402
 
-MIN_DIR = DATA / "minutes"
 SLEEP = 1.2          # push2his 限流敏感, 低速稳定优先
 BACKOFF_MAX = 30.0
 EM_HOSTS = ["push2his.eastmoney.com", "push2delay.eastmoney.com",
@@ -109,7 +109,7 @@ def trade_dates(start: str) -> list[str]:
 
 def sealed_set(pro, date: str) -> pd.DataFrame:
     """封板组: 历史取events_enriched, 当日取live池"""
-    ev = pd.read_parquet(DATA / "events_enriched.parquet")
+    ev = load("limitup.events_enriched")
     sub = ev[ev["trade_date"] == date]
     if len(sub):
         return pd.DataFrame({
@@ -244,7 +244,6 @@ def main():
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
-    MIN_DIR.mkdir(parents=True, exist_ok=True)
     start, host = probe_depth()
     if not start:
         print("所有东财host均不可用, 稍后重试", flush=True)
@@ -260,12 +259,13 @@ def main():
     import config
     pro = ts.pro_api(config.get_token())
     for d in dates:
-        f = MIN_DIR / f"zt_minute_{d}.parquet"
+        f = path_of("limitup.zt_minute", date=d)
         if f.exists() and not args.force:
             print(f"  {d}: 已存在, 跳过", flush=True)
             continue
         out = fetch_day(pro, d, limit=args.limit)
         if len(out):
+            f.parent.mkdir(parents=True, exist_ok=True)
             out.to_parquet(f, index=False)
             print(f"  → {f}", flush=True)
         time.sleep(0.5)

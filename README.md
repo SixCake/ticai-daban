@@ -59,6 +59,7 @@ bash daily_update.sh         # 收盘后增量更新事件库并重跑轨迹标�
 ```
 ticai-daban/
 ├── config.py               # 全局配置（路径/token/概念过滤规则）
+├── datastore.py            # 数据目录注册表 + 统一查询层（路径唯一出处）
 ├── core/                   # 领域逻辑层：纯计算，单一权威出处
 │   ├── attribute.py        #   独占归属 + 多概念触及层
 │   ├── roles.py            #   角色体系（龙头/连板/共振/补涨）
@@ -70,7 +71,7 @@ ticai-daban/
 │   ├── tx.py               #   腾讯实时行情(60只/批)
 │   ├── eastmoney.py        #   东财概念板块涨幅榜（外部对照）
 │   └── zt_pool.py          #   akshare当日涨停池
-├── collect/                # 采集层：tushare增量 → data/*.parquet
+├── collect/                # 采集层：tushare/东财增量 → datastore 各数据集
 ├── build/                  # 加工层：离线批处理（事件富化/归属/题材快照）
 ├── research/               # 研究层：统计分析脚本（编号即研究顺序）
 ├── apps/                   # 应用层：只做进程编排
@@ -82,8 +83,40 @@ ticai-daban/
 ├── web/
 │   └── dashboard.html      # 深色三页签看板
 ├── start.sh / stop.sh / daily_update.sh   # 一键启停/收盘更新
-├── data/                   # parquet产物 + live/实时快照 + review/复盘缓存（不入库）
+├── data/                   # 按 域/频率 归档（见下节），不入库
 └── docs/                   # 研究报告与决策记录
+```
+
+## 数据目录与统一查询
+
+所有 parquet 产物按 `data/{域}/{频率}/` 归档，路径由 `datastore.py` 的注册表
+`DATASETS` 唯一管理，其他脚本一律通过 `load/save/path_of` 访问，不硬编码路径：
+
+| 数据集 | 频率 | 说明 |
+|---|---|---|
+| limitup.events | 1d | 涨停事件原始库（tushare limit_list_d, 2019-11起） |
+| limitup.events_enriched | 1d | 事件富化：一字板/T+1开高低收收益/ST标记 |
+| limitup.zt_minute_{date} | 1m | 当日封板组+炸板组标的1分钟K线（东财源，按日分区） |
+| theme.concepts / theme.members | static | 概念列表（is_theme过滤）/ 成分快照 |
+| theme.attribution | 1d | 涨停事件×概念独占归属 |
+| theme.day | 1d | 题材日度快照：涨停家数/连板/龙头/年龄 |
+| market.daily_panel | 1d | 全A日度行情面板（约200MB） |
+| meta.trade_cal | static | SSE交易日历缓存 |
+
+`data/live/`（盘中瞬态 jsonl/json）与 `data/review/`（复盘缓存）不入注册表。
+
+```bash
+python datastore.py list                  # 数据集清单（状态/体积/路径）
+python datastore.py info limitup.zt_minute
+python datastore.py head theme.day -n 5
+```
+
+```python
+from datastore import load, save, path_of, partition_dates
+df = load("limitup.events_enriched", columns=["trade_date", "ts_code"])
+df = load("limitup.zt_minute", date="20260825")   # 分区数据集
+save("theme.day", df)
+partition_dates("limitup.zt_minute")              # 已有分区日期列表
 ```
 
 ## 数据源与口径

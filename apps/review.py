@@ -19,6 +19,7 @@ from config import DATA  # noqa: E402
 from core.attribute import load_con2stock, load_maps, touch_map  # noqa: E402
 from core.reality import reality_mask  # noqa: E402
 from core.roles import RoleContext, roles_of  # noqa: E402
+from datastore import load  # noqa: E402
 
 _MAPS = None
 _CON2STOCK = None
@@ -44,9 +45,9 @@ def _panel_index(date: str) -> pd.DataFrame:
     """当日行情切片(ts_code索引), 供离线中军B计算"""
     global _PANEL
     if _PANEL is None:
-        _PANEL = pd.read_parquet(DATA / "daily_panel.parquet",
-                                 columns=["trade_date", "ts_code", "pct_chg",
-                                          "close", "vol"])
+        _PANEL = load("market.daily_panel",
+                      columns=["trade_date", "ts_code", "pct_chg",
+                               "close", "vol"])
     pn = _PANEL[_PANEL["trade_date"] == date]
     return pn.set_index("ts_code")
 
@@ -54,8 +55,7 @@ def _panel_index(date: str) -> pd.DataFrame:
 def _memnames():
     global _MEMNAMES
     if _MEMNAMES is None:
-        mem = pd.read_parquet(DATA / "concept_members.parquet",
-                              columns=["con_code", "con_name"])
+        mem = load("theme.members", columns=["con_code", "con_name"])
         _MEMNAMES = dict(zip(mem["con_code"], mem["con_name"]))
     return _MEMNAMES
 
@@ -74,9 +74,9 @@ OUT.mkdir(exist_ok=True)
 
 
 def _events(date: str) -> pd.DataFrame:
-    ev = pd.read_parquet(DATA / "events_enriched.parquet")
-    att = pd.read_parquet(DATA / "attribution.parquet")
-    td = pd.read_parquet(DATA / "theme_day.parquet")
+    ev = load("limitup.events_enriched")
+    att = load("theme.attribution")
+    td = load("theme.day")
     df = ev.merge(att[["trade_date", "ts_code", "concept_code"]],
                   on=["trade_date", "ts_code"], how="left")
     df = df.merge(td[["trade_date", "concept_code", "concept_name", "zt_cnt",
@@ -95,7 +95,7 @@ def build_review(date: str) -> dict:
     stock2con, msize, cname = _maps()
     _, touches = touch_map(day["ts_code"].tolist(), stock2con, msize)
 
-    td_all = pd.read_parquet(DATA / "theme_day.parquet")
+    td_all = load("theme.day")
     ladder = td_all[td_all["trade_date"] == date].sort_values(
         ["zt_cnt", "max_height"], ascending=False)
 
@@ -226,8 +226,7 @@ def build_review(date: str) -> dict:
 def main():
     date = sys.argv[1] if len(sys.argv) > 1 else None
     if not date:
-        ev = pd.read_parquet(DATA / "events_enriched.parquet",
-                             columns=["trade_date"])
+        ev = load("limitup.events_enriched", columns=["trade_date"])
         date = ev["trade_date"].max()
     snap = build_review(date)
     if "error" in snap:

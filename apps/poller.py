@@ -24,6 +24,7 @@ from core.attribute import (attribute_day, load_con2stock, load_maps,  # noqa: E
                             touch_map)
 from core.calendar import is_polling_hours  # noqa: E402
 from core.roles import RoleContext, roles_of  # noqa: E402
+from datastore import load, path_of, save  # noqa: E402
 from quotes.tx import fetch_quotes  # noqa: E402
 from quotes.zt_pool import fetch_pool, norm_pool  # noqa: E402
 
@@ -36,15 +37,15 @@ pro = get_pro()
 
 
 def trade_days_upto(end: str) -> list[str]:
-    cache = DATA / "trade_cal_cache.parquet"
+    cache = path_of("meta.trade_cal")
     if cache.exists():
-        days = pd.read_parquet(cache)["cal_date"].tolist()
+        days = load("meta.trade_cal")["cal_date"].tolist()
         if days and days[-1] >= end:
             return [d for d in days if d <= end]
     cal = pro.trade_cal(exchange="SSE", start_date="20190101", end_date=end,
                         is_open="1")
     days = sorted(cal["cal_date"].tolist())
-    cal.to_parquet(cache, index=False)
+    save("meta.trade_cal", cal)
     return days
 
 
@@ -199,7 +200,7 @@ class DayState:
 def main():
     stock2con, msize, cname = load_maps()
     con2stock = load_con2stock()
-    att = pd.read_parquet(DATA / "attribution.parquet")
+    att = load("theme.attribution")
     att = att[att["concept_code"] != "UNASSIGNED"]
     att_set = set(zip(att["trade_date"], att["ts_code"], att["concept_code"]))
     att_dates = sorted(att["trade_date"].unique())
@@ -209,9 +210,9 @@ def main():
     last_td = days[-1]
     # 连续活跃天数基线(截至parquet最后日期)
     age_base = {}
-    tdf = DATA / "theme_day.parquet"
+    tdf = path_of("theme.day")
     if tdf.exists():
-        td = pd.read_parquet(tdf, columns=["trade_date", "concept_code"])
+        td = load("theme.day", columns=["trade_date", "concept_code"])
         last_pd_date = td["trade_date"].max()
         dates_sorted = sorted(td["trade_date"].unique())
         pos = {d: i for i, d in enumerate(dates_sorted)}

@@ -13,23 +13,21 @@ v2密度tie-break背景(研究03): v1"成分数小"会把深中华A锁进两轮�
 而丢掉黄金概念(82成分,raw3)、金健米业锁进乳业(35,raw1)丢掉粮食概念(47,raw4)。
 密度tie-break使大热点漏标 48.8%→21.7%, 现实格 n 984→4237、日聚类t 22.6→36.0。
 
-离线全量产物由 build/attribute.py 写出(data/attribution.parquet)；
+离线全量产物由 build/attribute.py 写出(theme.attribution)；
 盘中实时归属(poller)与雷达(radar)直接调用本模块函数。
 """
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-import pandas as pd
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA  # noqa: E402
+from datastore import load  # noqa: E402
 
 
 def load_maps():
     """只读加载: 返回 (stock2con, msize, cname)，仅is_theme概念"""
-    concepts = pd.read_parquet(DATA / "concepts.parquet")
-    members = pd.read_parquet(DATA / "concept_members.parquet")
+    concepts = load("theme.concepts")
+    members = load("theme.members")
     theme = concepts[concepts["is_theme"]]
     theme_codes = set(theme["ts_code"])
     msize = theme.set_index("ts_code")["member_count"].to_dict()
@@ -44,8 +42,8 @@ def load_maps():
 
 def load_con2stock() -> dict:
     """概念 → 成分股代码列表 (仅is_theme概念)"""
-    concepts = pd.read_parquet(DATA / "concepts.parquet")
-    members = pd.read_parquet(DATA / "concept_members.parquet")
+    concepts = load("theme.concepts")
+    members = load("theme.members")
     theme_codes = set(concepts[concepts["is_theme"]]["ts_code"])
     mem = members[members["concept_code"].isin(theme_codes)]
     return (mem.groupby("concept_code")["con_code"]

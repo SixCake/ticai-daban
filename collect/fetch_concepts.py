@@ -2,8 +2,8 @@
 """采集概念列表与成分（tushare 同花顺概念, 当前快照）
 
 产物:
-  data/concepts.parquet        概念列表(含is_theme过滤标记/member_count)
-  data/concept_members.parquet 概念成分快照
+  theme.concepts  概念列表(含is_theme过滤标记/member_count)
+  theme.members   概念成分快照
 """
 import sys
 import time
@@ -13,7 +13,8 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import (CONCEPT_NOISE_KEYWORDS, DATA, MAX_MEMBER_COUNT, get_pro)
+from config import CONCEPT_NOISE_KEYWORDS, MAX_MEMBER_COUNT, get_pro
+from datastore import save
 
 pro = get_pro()
 
@@ -52,9 +53,9 @@ def main():
         lambda n: any(k in str(n) for k in CONCEPT_NOISE_KEYWORDS))
     idx["is_theme"] = (~idx["is_noise_kw"]) & (idx["member_count"] <= MAX_MEMBER_COUNT) & (idx["member_count"] > 0)
 
-    idx.to_parquet(DATA / "concepts.parquet", index=False)
+    save("theme.concepts", idx)
     cols = ["concept_code", "concept_name", "con_code", "con_name", "snapshot_date"]
-    members[cols].to_parquet(DATA / "concept_members.parquet", index=False)
+    save("theme.members", members[cols])
 
     print(f"\n概念列表 {len(idx)} 个, 其中题材 {idx['is_theme'].sum()} 个")
     print(f"成分明细 {len(members)} 行, 覆盖股票 {members['con_code'].nunique()} 只")

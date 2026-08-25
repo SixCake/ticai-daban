@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from config import DATA  # noqa: E402
 from apps.review import build_review  # noqa: E402
+from datastore import load  # noqa: E402
 
 WEB = ROOT / "web"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
@@ -61,9 +62,7 @@ class Handler(SimpleHTTPRequestHandler):
                             json.dumps({"error": str(e)}, ensure_ascii=False), 500)
             return self._send_json(f.read_text(encoding="utf-8"))
         if parsed.path == "/api/dates":
-            import pandas as pd
-            ev = pd.read_parquet(DATA / "events_enriched.parquet",
-                                 columns=["trade_date"])
+            ev = load("limitup.events_enriched", columns=["trade_date"])
             dates = sorted(ev["trade_date"].unique())[-60:][::-1]
             return self._send_json(json.dumps({"dates": dates}))
         return super().do_GET()

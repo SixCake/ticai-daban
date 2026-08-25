@@ -2,11 +2,11 @@
 """构建日线面板: tushare全量(默认) 或 lab_333前复权日线(可选加速) + tushare补尾
 
 数据源优先级:
-  1. 已有 data/daily_panel.parquet → 仅补尾
+  1. 已有 market.daily_panel → 仅补尾
   2. 环境变量 LAB333_DAILY_DIR 指向前复权日线parquet目录(可选, 本地有则快) → 载入+补尾rebase
   3. 纯tushare pro.daily 逐日全量(官方除权调整口径, 无需rebase)
 
-产物: data/daily_panel.parquet
+产物: market.daily_panel
   trade_date, ts_code, open, high, low, close, pre_close, pct_chg, open_ret, vol
   pct_chg = close/pre_close-1, open_ret = open/pre_close-1 (官方除权调整口径)
 """
@@ -18,10 +18,12 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA, START_DATE, get_pro
+from config import START_DATE, get_pro
+from datastore import path_of
 
 pro = get_pro()
-OUT = DATA / "daily_panel.parquet"
+OUT = path_of("market.daily_panel")
+OUT.parent.mkdir(parents=True, exist_ok=True)
 LAB333 = Path(os.environ["LAB333_DAILY_DIR"]) if os.environ.get("LAB333_DAILY_DIR") else None
 
 # 个股前缀: SSE 60x/68x, SZSE 00x/30x

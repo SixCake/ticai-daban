@@ -28,14 +28,14 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA
+from datastore import load
 
 JUNK = {"国企改革", "养老概念", "乡村振兴", "融资融券", "央企国企改革"}
 
 
-def load():
-    concepts = pd.read_parquet(DATA / "concepts.parquet")
-    members = pd.read_parquet(DATA / "concept_members.parquet")
+def load_data():
+    concepts = load("theme.concepts")
+    members = load("theme.members")
     theme = concepts[concepts["is_theme"]]
     msize = theme.set_index("ts_code")["member_count"].to_dict()
     cname = theme.set_index("ts_code")["name"].to_dict()
@@ -43,7 +43,7 @@ def load():
     mem = members[members["concept_code"].isin(tcodes)]
     stock2con = mem.groupby("con_code")["concept_code"].apply(
         lambda s: sorted(set(s))).to_dict()
-    ev = pd.read_parquet(DATA / "events_enriched.parquet")
+    ev = load("limitup.events_enriched")
     return ev, stock2con, msize, cname
 
 
@@ -81,7 +81,7 @@ def day_cluster_t(dm):
 
 
 def main():
-    ev, stock2con, msize, cname = load()
+    ev, stock2con, msize, cname = load_data()
     lastm_all = ev["last_time"].astype(str).str.zfill(6)
 
     rows = {m: [] for m in ("v1", "v2")}

@@ -20,11 +20,10 @@ import json
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from config import DATA  # noqa: E402
+from datastore import load  # noqa: E402
 
 LIVE = DATA / "live"
 
@@ -43,9 +42,9 @@ def _load_log(date: str) -> list[dict]:
 
 def _outcomes(date: str) -> tuple[dict, str]:
     """返回 {code: {height,first_time,last_time,open_times}}, 标签源名"""
-    ev = pd.read_parquet(DATA / "events_enriched.parquet",
-                         columns=["trade_date", "ts_code", "limit_times",
-                                  "open_times", "first_time", "last_time"])
+    ev = load("limitup.events_enriched",
+              columns=["trade_date", "ts_code", "limit_times",
+                       "open_times", "first_time", "last_time"])
     ev = ev[ev["trade_date"] == date]
     if len(ev):
         return {r.ts_code: {"height": int(r.limit_times),

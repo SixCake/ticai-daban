@@ -3,7 +3,7 @@
 
 龙头判定（游资世界观）: 连板高度 > 封单额 > 首封时间早 > 炸板次数少
 
-产物: data/theme_day.parquet
+产物: theme.day
   trade_date, concept_code, concept_name,
   zt_cnt(独占后家数), zt_cnt_raw(归属前触及家数),
   max_height(最高连板), leader_code, leader_name, leader_height, leader_fd_amount,
@@ -16,18 +16,18 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA
+from datastore import load, save
 
 
 def main():
-    att = pd.read_parquet(DATA / "attribution.parquet")
-    ev = pd.read_parquet(DATA / "events_enriched.parquet",
-                         columns=["trade_date", "ts_code", "name", "limit_times",
-                                  "fd_amount", "first_min", "open_times", "is_st"])
+    att = load("theme.attribution")
+    ev = load("limitup.events_enriched",
+              columns=["trade_date", "ts_code", "name", "limit_times",
+                       "fd_amount", "first_min", "open_times", "is_st"])
 
     # 归属前每概念触及家数
-    mem = pd.read_parquet(DATA / "concept_members.parquet")
-    concepts = pd.read_parquet(DATA / "concepts.parquet")
+    mem = load("theme.members")
+    concepts = load("theme.concepts")
     theme_codes = set(concepts[concepts["is_theme"]]["ts_code"])
     mem_t = mem[mem["concept_code"].isin(theme_codes)]
     stock2con = mem_t.groupby("con_code")["concept_code"].apply(set).to_dict()
@@ -82,8 +82,8 @@ def main():
             "max_height", "theme_age", "leader_code", "leader_name",
             "leader_height", "leader_fd_amount"]
     td = td[cols].sort_values(["trade_date", "zt_cnt"], ascending=[True, False])
-    td.to_parquet(DATA / "theme_day.parquet", index=False)
-    print(f"题材日度快照 {len(td)} 行 → theme_day.parquet")
+    p = save("theme.day", td)
+    print(f"题材日度快照 {len(td)} 行 → {p}")
     print(f"  覆盖日期 {td['trade_date'].min()}~{td['trade_date'].max()}, "
           f"题材数 {td['concept_code'].nunique()}")
 

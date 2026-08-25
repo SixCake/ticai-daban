@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """采集涨停事件（tushare limit_list_d, 2019-11-28→今, 增量续跑）
 
-产物: data/limit_events.parquet
+产物: limitup.events
 """
 import sys
 import time
@@ -10,10 +10,12 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA, START_DATE, get_pro
+from config import START_DATE, get_pro
+from datastore import path_of
 
 pro = get_pro()
-OUT = DATA / "limit_events.parquet"
+OUT = path_of("limitup.events")
+OUT.parent.mkdir(parents=True, exist_ok=True)
 
 
 def trade_days(start: str, end: str) -> list[str]:

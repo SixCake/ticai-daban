@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """事件富化: 涨停事件 × 日线面板 → 一字板标记 + T+1三口径收益
 
-产物: data/events_enriched.parquet
+产物: limitup.events_enriched
   事件字段 + is_yizi + first_min + next_open_ret/next_close_ret/next_high_ret/next_low_ret
   + next_is_yizi（T+1一字影响次日卖出可行性）
 """
@@ -12,12 +12,12 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA
+from datastore import load, save
 
 
 def main():
-    ev = pd.read_parquet(DATA / "limit_events.parquet")
-    panel = pd.read_parquet(DATA / "daily_panel.parquet")
+    ev = load("limitup.events")
+    panel = load("market.daily_panel")
     print(f"事件 {len(ev)} 行, 面板 {len(panel)} 行")
 
     # --- 当日OHLC → 一字板判定 ---
@@ -51,8 +51,8 @@ def main():
 
     keep = [c for c in ev.columns if not c.startswith(("t1_", "day_"))]
     ev = ev[keep]
-    ev.to_parquet(DATA / "events_enriched.parquet", index=False)
-    print(f"富化完成 {len(ev)} 行 → events_enriched.parquet")
+    p = save("limitup.events_enriched", ev)
+    print(f"富化完成 {len(ev)} 行 → {p}")
     print(f"  一字板占比 {ev['is_yizi'].mean():.3%}, T+1可得 {ev['next_open_ret'].notna().mean():.3%}")
 
 

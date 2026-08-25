@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA
+from datastore import load
 
 
 def bucket_zt(c):
@@ -29,12 +29,11 @@ def bucket_zt(c):
 
 
 def main():
-    dp = pd.read_parquet(DATA / "daily_panel.parquet")
-    ev = pd.read_parquet(DATA / "events_enriched.parquet",
-                         columns=["trade_date", "ts_code"])
-    td = pd.read_parquet(DATA / "theme_day.parquet")
-    mem = pd.read_parquet(DATA / "concept_members.parquet")
-    con = pd.read_parquet(DATA / "concepts.parquet")
+    dp = load("market.daily_panel")
+    ev = load("limitup.events_enriched", columns=["trade_date", "ts_code"])
+    td = load("theme.day")
+    mem = load("theme.members")
+    con = load("theme.concepts")
     theme_codes = set(con[con["is_theme"]]["ts_code"])
     mem_t = mem[mem["concept_code"].isin(theme_codes)]
 

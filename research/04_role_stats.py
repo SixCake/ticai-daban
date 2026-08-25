@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA
+from datastore import load
 
 
 def stat(df, ret_col="next_open_ret"):
@@ -46,9 +46,9 @@ def bucket_zt(c):
 
 
 def main():
-    ev = pd.read_parquet(DATA / "events_enriched.parquet")
-    att = pd.read_parquet(DATA / "attribution.parquet")
-    td = pd.read_parquet(DATA / "theme_day.parquet")
+    ev = load("limitup.events_enriched")
+    att = load("theme.attribution")
+    td = load("theme.day")
 
     att = att[att["concept_code"] != "UNASSIGNED"]
     df = ev.merge(att[["trade_date", "ts_code", "concept_code"]],

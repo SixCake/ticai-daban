@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATA
+from datastore import load
 
 
 def stat(df: pd.DataFrame, ret_col: str = "next_open_ret") -> pd.Series:
@@ -55,9 +55,9 @@ def bucket_time(m):
 
 
 def main():
-    ev = pd.read_parquet(DATA / "events_enriched.parquet")
-    att = pd.read_parquet(DATA / "attribution.parquet")
-    td = pd.read_parquet(DATA / "theme_day.parquet")
+    ev = load("limitup.events_enriched")
+    att = load("theme.attribution")
+    td = load("theme.day")
 
     df = ev.merge(att, on=["trade_date", "ts_code"], how="left")
     df = df.merge(td[["trade_date", "concept_code", "zt_cnt", "theme_age"]],

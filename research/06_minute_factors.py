@@ -5,7 +5,7 @@
   A) 今日最终能否封死 (封板组 vs 炸板组) —— 该不该上车
   B) 封板组内: 首封后是否炸板 (open_times==0 硬封 vs ≥1) —— 上车后风险
 
-数据: data/minutes/zt_minute_*.parquet (collect/fetch_zt_minute.py)
+数据: limitup.zt_minute 分区 (collect/fetch_zt_minute.py)
 样本: 触板分钟 = 首根 high>=limit_px*0.998 的K线; 特征用截至该分钟(含)信息
      排除: 一字板(开盘即封, 半路无机会)、ST、首触在14:45后(观察窗过短)
 
@@ -21,9 +21,8 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from config import DATA  # noqa: E402
+from datastore import load, partition_dates  # noqa: E402
 
-MIN_DIR = DATA / "minutes"
 OUT = ROOT / "research" / "out"
 TOUCH_TOL = 0.998          # high >= limit_px*0.998 记为触板
 LATE_CUTOFF = "1445"       # 首触晚于此点不进主样本
@@ -115,12 +114,13 @@ def main():
     ap.add_argument("--days", type=int, default=99)
     args = ap.parse_args()
 
-    files = sorted(MIN_DIR.glob("zt_minute_*.parquet"))[-args.days:]
-    if not files:
+    dates = partition_dates("limitup.zt_minute")[-args.days:]
+    if not dates:
         print("无数据, 先跑 collect/fetch_zt_minute.py")
         return
-    df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
-    print(f"载入 {len(files)} 日 {df.groupby('date')['ts_code'].nunique().sum()} "
+    df = pd.concat([load("limitup.zt_minute", date=d) for d in dates],
+                   ignore_index=True)
+    print(f"载入 {len(dates)} 日 {df.groupby('date')['ts_code'].nunique().sum()} "
           f"stock-day bars={len(df)}")
 
     rows = []
