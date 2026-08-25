@@ -12,8 +12,8 @@
 
 1. **数据层（collect/ + build/）**：tushare 涨停事件（2019-11 至今）+ 日线面板 + 同花顺概念成分，加工出事件富化表（一字板判定、T+1 三口径收益）与题材日度快照（独占归属涨停家数、最高连板、龙头、题材年龄）。
 2. **研究层（research/ + docs/）**：在事件库上做无前视条件统计——首板特征、封单额成交建模、归属口径 A/B、龙头/连板/补涨/中军角色验证、涨停概率校准复盘，每个研究编号沉淀为文档。
-3. **盘中监控（monitor/poller + server + dashboard）**：每 60 秒拉取当日涨停池 → 实时独占归属算题材天梯 → 识别现实格候选 → 角色徽章，深色三页签 Web 看板（盘中实时 / 复盘梳理 / 预警雷达）。
-4. **预警雷达（monitor/radar）**：每 20 秒全量扫描 378 个题材概念约 5200 只成分股的实时行情，自算题材热度排名（附东财板块榜对照）与未板股涨停概率排名，把「只能打板后确认」提前到「封板前感知」，并全量记录校准日志供收盘标注与概率校准研究。
+3. **盘中监控（apps/poller + server + web/dashboard）**：每 60 秒拉取当日涨停池 → 实时独占归属算题材天梯 → 识别现实格候选 → 角色徽章，深色三页签 Web 看板（盘中实时 / 复盘梳理 / 预警雷达）。
+4. **预警雷达（apps/radar）**：每 20 秒全量扫描 378 个题材概念约 5200 只成分股的实时行情，自算题材热度排名（附东财板块榜对照）与未板股涨停概率排名，把「只能打板后确认」提前到「封板前感知」，并全量记录校准日志供收盘标注与概率校准研究。
 
 ## 快速开始
 
@@ -45,36 +45,43 @@ python build/theme_daily.py            # 题材日度快照
 启动盘中监控平台（默认端口 8765）：
 
 ```bash
-bash monitor/start.sh          # poller + 看板服务 + 预警雷达
-bash monitor/stop.sh           # 停止全部
-bash monitor/daily_update.sh   # 收盘后增量更新事件库并重跑轨迹标注
+bash start.sh                # poller + 看板服务 + 预警雷达
+bash stop.sh                 # 停止全部
+bash daily_update.sh         # 收盘后增量更新事件库并重跑轨迹标注
 ```
 
 打开 http://localhost:8765 即可看到三页签看板。闭市时 poller/雷达自动休眠（轮询间隔拉长），看板回退展示最近交易日快照。
 
-## 目录结构
+## 分层架构
+
+依赖方向单向：apps → core/quotes → 无。core 是领域逻辑唯一出处（纯计算，无网络、无快照写入）；quotes 只做网络请求与源格式归一化；apps 只做进程编排。同一口径（归属/角色/热度/概率/现实格）全项目只有一份实现，盘中与离线共用。
 
 ```
 ticai-daban/
-├── config.py               # 路径/token/概念过滤规则
-├── collect/                # 采集（全部支持增量续跑）
-│   ├── fetch_limit_events.py
-│   ├── fetch_daily_panel.py
-│   └── fetch_concepts.py
-├── build/                  # 加工
-│   ├── enrich_events.py    # 事件×日线 → 一字板/T+1收益
-│   ├── attribute.py        # 独占归属
-│   └── theme_daily.py      # 题材日度快照
-├── research/               # 统计分析脚本（编号即研究顺序）
-├── monitor/                # 监控平台
-│   ├── poller.py           # 60s轮询：涨停池→实时独占归属→现实格候选→角色徽章
-│   ├── tx_quote.py         # 腾讯实时行情(60只/批)：价/涨幅/量比/涨停价/换手
-│   ├── radar.py            # 预警雷达：20s全量扫描→题材热度+涨停概率排名
-│   ├── label_radar.py      # 收盘给雷达日志挂涨停结果标签
-│   ├── review.py           # 复盘快照生成器（离线全历史可用）
-│   ├── server.py           # 本地HTTP服务：静态页+JSON API
-│   ├── dashboard.html      # 深色三页签看板
-│   ├── start.sh / stop.sh / daily_update.sh
+├── config.py               # 全局配置（路径/token/概念过滤规则）
+├── core/                   # 领域逻辑层：纯计算，单一权威出处
+│   ├── attribute.py        #   独占归属 + 多概念触及层
+│   ├── roles.py            #   角色体系（龙头/连板/共振/补涨）
+│   ├── heat.py             #   题材热度v2（尺寸中性）
+│   ├── prob.py             #   涨停概率v0
+│   ├── reality.py          #   现实格口径
+│   └── codes/calendar/momentum  # 代码转换/交易时段/窗口差分
+├── quotes/                 # 行情源层：只管网络，不含业务判定
+│   ├── tx.py               #   腾讯实时行情(60只/批)
+│   ├── eastmoney.py        #   东财概念板块涨幅榜（外部对照）
+│   └── zt_pool.py          #   akshare当日涨停池
+├── collect/                # 采集层：tushare增量 → data/*.parquet
+├── build/                  # 加工层：离线批处理（事件富化/归属/题材快照）
+├── research/               # 研究层：统计分析脚本（编号即研究顺序）
+├── apps/                   # 应用层：只做进程编排
+│   ├── poller.py           #   60s轮询引擎：涨停池→实时归属→现实格候选→角色徽章
+│   ├── radar.py            #   20s预警雷达：热度排名+概率排名+校准日志
+│   ├── review.py           #   复盘快照生成器（离线全历史可用）
+│   ├── label_radar.py      #   收盘给雷达日志挂涨停结果标签
+│   └── server.py           #   本地HTTP服务：静态页+JSON API
+├── web/
+│   └── dashboard.html      # 深色三页签看板
+├── start.sh / stop.sh / daily_update.sh   # 一键启停/收盘更新
 ├── data/                   # parquet产物 + live/实时快照 + review/复盘缓存（不入库）
 └── docs/                   # 研究报告与决策记录
 ```
@@ -160,7 +167,7 @@ prob = sigmoid(z)；临近涨停(价格≥涨停价×0.995)时 z = max(z, 4.0)
 - **复盘梳理**：选日期 → 当日现实格命中及其 T+1 兑现、前一交易日信号的兑现验证、题材/连板天梯、全池明细、历史统计；缺失日期现场构建并缓存。
 - **预警雷达**：每 20s 全扫成分股 → 题材热度自算排名（东财对照列）+ 未板股涨停概率榜。概览卡（热点题材/冲板候选/高概率/触板数）、榜内排名自适应底色、概率进度条、新晋上榜与概率变化标记、距板≤1.5% 闪烁提醒、题材行展开领涨成分。
 
-**校准日志与轨迹标注**：雷达每 cycle(20s) 记录涨幅≥3% 或概率≥0.2 的全量样本（含负例）→ `data/live/radar_log_YYYYMMDD.jsonl`（t/pct/s1/s3/s5/vr/tover/dist/prob/dp/heat/trank/dheat/theme/near）。收盘 `label_radar.py` 挂结果标签（是否涨停/连板/首封/末封/炸板次数），汇总每 stock-day 概率轨迹与 lead30/lead50（雷达提前首封分钟数）→ `radar_labeled_YYYYMMDD.jsonl`；`python monitor/label_radar.py DATE CODE` 可追溯单只分钟级轨迹。日志粒度 2026-08 由 1 分钟加密到 20 秒——研究05 发现 1 分钟粒度会丢失拉升轨迹（涨停股首条≥4%日志平均已在 +9%）。
+**校准日志与轨迹标注**：雷达每 cycle(20s) 记录涨幅≥3% 或概率≥0.2 的全量样本（含负例）→ `data/live/radar_log_YYYYMMDD.jsonl`（t/pct/s1/s3/s5/vr/tover/dist/prob/dp/heat/trank/dheat/theme/near）。收盘 `label_radar.py` 挂结果标签（是否涨停/连板/首封/末封/炸板次数），汇总每 stock-day 概率轨迹与 lead30/lead50（雷达提前首封分钟数）→ `radar_labeled_YYYYMMDD.jsonl`；`python apps/label_radar.py DATE CODE` 可追溯单只分钟级轨迹。日志粒度 2026-08 由 1 分钟加密到 20 秒——研究05 发现 1 分钟粒度会丢失拉升轨迹（涨停股首条≥4%日志平均已在 +9%）。
 
 **限流保护**：腾讯并发 8 线程，扫描完整性 <90% 时周期间隔指数退避 20s→40s→80s（封顶×4）；东财板块榜每分钟仅拉一次，失败退避 5 分钟并复用缓存。
 

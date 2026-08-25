@@ -1,6 +1,6 @@
 #!/bin/bash
 # 停止监控平台
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")"
 for f in logs/poller.pid logs/server.pid logs/radar.pid; do
   if [ -f "$f" ]; then
     pid=$(cat "$f")

@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """轻量本地服务: 看板静态页 + JSON API
 
-GET /                 → dashboard.html
+GET /                 → web/dashboard.html
 GET /api/live         → data/live/latest.json
 GET /api/radar        → data/live/radar.json (预警雷达)
 GET /api/review?date= → data/review/review_DATE.json (缺失则现场构建)
 GET /api/dates        → 最近60个交易日列表
 
-启动: python server.py [port]  默认8765
+启动: python apps/server.py [port]  默认8765
 """
 import json
 import sys
@@ -18,15 +18,15 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from config import DATA  # noqa: E402
-from monitor.review import build_review  # noqa: E402
+from apps.review import build_review  # noqa: E402
 
-MON = ROOT / "monitor"
+WEB = ROOT / "web"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
 
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
-        super().__init__(*a, directory=str(MON), **kw)
+        super().__init__(*a, directory=str(WEB), **kw)
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -58,7 +58,7 @@ class Handler(SimpleHTTPRequestHandler):
                             json.dumps(snap, ensure_ascii=False), 404)
                 except Exception as e:
                     return self._send_json(
-                        json.dumps({"error": str(e)}, ensure_ascii=False), 500)
+                            json.dumps({"error": str(e)}, ensure_ascii=False), 500)
             return self._send_json(f.read_text(encoding="utf-8"))
         if parsed.path == "/api/dates":
             import pandas as pd

@@ -1,8 +1,8 @@
 #!/bin/bash
 # 收盘后更新事件库与题材归属（增量），供次日轮询与复盘使用
-# 用法: bash monitor/daily_update.sh
+# 用法: bash daily_update.sh
 set -e
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")"
 PY=${PYTHON:-}
 if [ -z "$PY" ]; then
   if [ -x /opt/homebrew/bin/python3.12 ]; then PY=/opt/homebrew/bin/python3.12; else PY=python3; fi
@@ -16,5 +16,5 @@ echo "==> 重建题材归属"
 echo "==> 重建题材日度快照"
 "$PY" build/theme_daily.py
 echo "==> 雷达轨迹标注(挂涨停结果/首封时间)"
-"$PY" monitor/label_radar.py
+"$PY" apps/label_radar.py
 echo "==> 完成"

@@ -4,11 +4,11 @@
 每60秒拉取akshare当日涨停池 → 实时独占归属算题材天梯 → 现实格候选识别
  → 写 data/live/latest.json + data/live/intraday_YYYYMMDD.jsonl
 
-现实格条件(研究02无前视格): 题材独占涨停≥8家 + 炸板≥1次后回封 +
-  炸板≤3次 + 最后封板≤11:00(午前回封)
+现实格候选(core/reality.py研究口径的盘中实时近似, 涨停池无is_yizi/is_st
+字段, 由池自身过滤承担): 题材独占涨停≥8家 + 炸板≥1次后回封 + 炸板≤3次
++ 最后封板≤11:00(午前回封)
 炸板池接口被网络封锁, 用涨停池快照diff做断板状态机: 出池=炸板, 再入池=回封
 """
-import bisect
 import json
 import sys
 import time
@@ -20,9 +20,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from config import DATA, get_pro  # noqa: E402
-from build.attribute import (attribute_day, load_con2stock, load_maps,  # noqa: E402
-                             touch_map)
-from tx_quote import fetch_quotes  # noqa: E402
+from core.attribute import (attribute_day, load_con2stock, load_maps,  # noqa: E402
+                            touch_map)
+from core.calendar import is_polling_hours  # noqa: E402
+from core.roles import RoleContext, roles_of  # noqa: E402
+from quotes.tx import fetch_quotes  # noqa: E402
+from quotes.zt_pool import fetch_pool, norm_pool  # noqa: E402
 
 LIVE = DATA / "live"
 LIVE.mkdir(exist_ok=True)
@@ -30,15 +33,6 @@ INTERVAL = 60
 SLOW_INTERVAL = 300  # 非交易时段
 
 pro = get_pro()
-
-
-def ts_code_of(code6: str) -> str:
-    code6 = str(code6).zfill(6)
-    if code6.startswith(("60", "68")):
-        return f"{code6}.SH"
-    if code6.startswith(("00", "30")):
-        return f"{code6}.SZ"
-    return f"{code6}.BJ"
 
 
 def trade_days_upto(end: str) -> list[str]:
@@ -52,32 +46,6 @@ def trade_days_upto(end: str) -> list[str]:
     days = sorted(cal["cal_date"].tolist())
     cal.to_parquet(cache, index=False)
     return days
-
-
-def is_trading_now(now: datetime) -> bool:
-    if now.weekday() >= 5:
-        return False
-    hm = now.hour * 100 + now.minute
-    return 915 <= hm <= 1505
-
-
-def fetch_pool(date: str) -> pd.DataFrame | None:
-    import akshare as ak
-    for attempt in range(3):
-        try:
-            df = ak.stock_zt_pool_em(date=date)
-            return df if df is not None and len(df) else None
-        except Exception:
-            time.sleep(2 * (attempt + 1))
-    return None
-
-
-def norm_pool(df: pd.DataFrame) -> pd.DataFrame:
-    p = df.copy()
-    p["ts_code"] = p["代码"].astype(str).str.zfill(6).map(ts_code_of)
-    p["first_time"] = p["首次封板时间"].astype(str).str.zfill(6)
-    p["last_time"] = p["最后封板时间"].astype(str).str.zfill(6)
-    return p
 
 
 class DayState:
@@ -139,26 +107,11 @@ class DayState:
 
         zt_by_concept = {t["concept_code"]: t["zt_cnt"] for t in ladder}
 
-        # ---- 角色徽章: 龙头/连板/共振/补涨 ----
-        age_by = {t["concept_code"]: t["theme_age"] for t in ladder}
-        leader_by = {t["concept_code"]: t["leader_code"] for t in ladder}
-        dpos = bisect.bisect_left(self.att_dates, self.date) - 1
-
-        def roles_of(code, k, h):
-            roles = []
-            age = age_by.get(k, 1)
-            if leader_by.get(k) == code:
-                roles.append("龙头")
-            elif h >= 2:
-                roles.append("连板")
-            if h == 1 and age == 1:
-                roles.append("共振")
-            if h <= 2 and age >= 2 and dpos >= 0:
-                appeared = any((self.att_dates[dpos - i], code, k) in self.att_set
-                               for i in range(0, min(age - 1, dpos + 1)))
-                if not appeared:
-                    roles.append("补涨")
-            return roles
+        # ---- 角色徽章: 龙头/连板/共振/补涨 (core.roles单一口径) ----
+        rctx = RoleContext(
+            leader_by={t["concept_code"]: t["leader_code"] for t in ladder},
+            age_by={t["concept_code"]: t["theme_age"] for t in ladder},
+            att_set=self.att_set, dates=self.att_dates, date=self.date)
 
         # ---- 活中军B: 腾讯实时报价, 热门题材成分内涨幅>=5%成交额最大者 ----
         hot = [t for t in ladder if t["zt_cnt"] >= 4][:6]
@@ -174,7 +127,7 @@ class DayState:
                 zj = max(cands, key=lambda x: x["amount"])
                 t["zhongjun"] = {"name": zj["name"], "pct": zj["pct"],
                                  "amount": zj["amount"]}
-        # 现实格候选
+        # 现实格候选(core/reality.py口径的盘中近似)
         candidates = []
         for _, r in pool.iterrows():
             k = attr.get(r["ts_code"])
@@ -208,7 +161,7 @@ class DayState:
                 "ts_code": r["ts_code"], "name": r["名称"],
                 "height": int(r["连板数"]), "theme": prim,
                 "themes": themes_list[:8],
-                "roles": roles_of(r["ts_code"], k, int(r["连板数"])),
+                "roles": roles_of(rctx, r["ts_code"], k, int(r["连板数"])),
                 "theme_cnt": int(zt_by_concept.get(k, 0)) if k in zt_by_concept else 0,
                 "open_times": int(r["炸板次数"]),
                 "first_time": r["first_time"], "last_time": r["last_time"],
@@ -227,7 +180,7 @@ class DayState:
 
         snap = {
             "ts": ts_str, "date": self.date,
-            "status": "live" if is_trading_now(datetime.now()) else "snapshot",
+            "status": "live" if is_polling_hours(datetime.now()) else "snapshot",
             "sentiment": sentiment, "themes": ladder,
             "candidates": candidates, "pool": pool_list,
             "exits": [{"ts_code": c, "time": t} for c, t in self.exits.items()],
@@ -279,7 +232,7 @@ def main():
     print(f"轮询引擎启动, 最近交易日 {last_td}, 间隔 {INTERVAL}s")
     while True:
         now = datetime.now()
-        trading = is_trading_now(now)
+        trading = is_polling_hours(now)
         today = now.strftime("%Y%m%d")
         hm = now.strftime("%H%M")
         # akshare对未开盘日期会返回上一交易日数据, 须自行定标

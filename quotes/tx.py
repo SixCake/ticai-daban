@@ -1,20 +1,13 @@
 # -*- coding: utf-8 -*-
 """腾讯实时行情 qt.gtimg.cn (60只/批, GBK)
 
-字段: f[1]名称 f[3]现价 f[4]昨收 f[32]涨幅% f[37]成交额(万) f[44]流通市值(亿)
-用途: 盘中识别题材中军B(成分内放量大涨但未涨停的大市值锚)
+字段: f[1]名称 f[3]现价 f[4]昨收 f[32]涨幅% f[37]成交额(万) f[38]换手%
+      f[44]流通市值(亿) f[47]涨停价 f[49]量比
+用途: 雷达全量扫描、盘中题材中军识别
 """
 import urllib.request
 
-
-def _sym(ts_code: str) -> str:
-    code, exch = ts_code.split(".")
-    return ("sh" if exch == "SH" else "sz") + code
-
-
-def _ts_code_of(sym: str) -> str:
-    exch = "SH" if sym.startswith("sh") else "SZ"
-    return f"{sym[2:]}.{exch}"
+from core.codes import to_sym, to_ts_code
 
 
 def fetch_quotes(codes: list[str]) -> dict:
@@ -23,7 +16,7 @@ def fetch_quotes(codes: list[str]) -> dict:
     out = {}
     for i in range(0, len(codes), 60):
         batch = codes[i:i + 60]
-        url = "http://qt.gtimg.cn/q=" + ",".join(_sym(c) for c in batch)
+        url = "http://qt.gtimg.cn/q=" + ",".join(to_sym(c) for c in batch)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             raw = urllib.request.urlopen(req, timeout=5).read().decode("gbk", "ignore")
@@ -38,7 +31,7 @@ def fetch_quotes(codes: list[str]) -> dict:
             if len(f) < 50 or not f[3]:
                 continue
             try:
-                out[_ts_code_of(sym.replace("v_", ""))] = {
+                out[to_ts_code(sym.replace("v_", ""))] = {
                     "name": f[1], "price": float(f[3]),
                     "pct": float(f[32]), "amount": float(f[37]) * 1e4,
                     "float_mv": float(f[44]) * 1e8,

@@ -3,6 +3,7 @@
 
 build_review(date) → dict:
   题材天梯 / 情绪 / 连板天梯 / 现实格命中事件及其T+1兑现 / 前一交易日现实格的兑现追踪
+口径: 现实格 core/reality.py, 角色 core/roles.py（与盘中poller同一出处）
 CLI: python review.py [date]  → 写 data/review/review_DATE.json
 """
 import json
@@ -15,7 +16,9 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from config import DATA  # noqa: E402
-from build.attribute import load_con2stock, load_maps, touch_map  # noqa: E402
+from core.attribute import load_con2stock, load_maps, touch_map  # noqa: E402
+from core.reality import reality_mask  # noqa: E402
+from core.roles import RoleContext, roles_of  # noqa: E402
 
 _MAPS = None
 _CON2STOCK = None
@@ -82,14 +85,6 @@ def _events(date: str) -> pd.DataFrame:
     return df
 
 
-def reality_mask(df: pd.DataFrame) -> pd.Series:
-    """无前视现实格: 大热点+炸板早回封+午前+炸板≤3"""
-    lastm = df["last_time"].astype(str).str.zfill(6)
-    return ((df["zt_cnt"] >= 8) & (df["open_times"] >= 1) &
-            (df["open_times"] <= 3) & (lastm < "140000") &
-            (lastm <= "110000") & (~df["is_yizi"]) & (~df["is_st"]))
-
-
 def build_review(date: str) -> dict:
     df = _events(date)
     dates = sorted(df["trade_date"].unique())
@@ -104,33 +99,16 @@ def build_review(date: str) -> dict:
     ladder = td_all[td_all["trade_date"] == date].sort_values(
         ["zt_cnt", "max_height"], ascending=False)
 
-    # ---- 角色判定: 龙头/连板/共振/补涨 (与研究04口径一致) ----
+    # ---- 角色判定: core.roles单一口径（与研究04一致, 与盘中poller一致） ----
     att_ok = df[df["concept_code"].notna() &
                 (df["concept_code"] != "UNASSIGNED")]
     att_set = set(zip(att_ok["trade_date"], att_ok["ts_code"],
                       att_ok["concept_code"]))
-    dpos = dates.index(date)
     daytd = td_all[td_all["trade_date"] == date]
-    leader_by = dict(zip(daytd["concept_code"], daytd["leader_code"]))
-    age_by = dict(zip(daytd["concept_code"], daytd["theme_age"]))
-
-    def roles_of(code, k, h):
-        if not isinstance(k, str) or k == "UNASSIGNED":
-            return []
-        roles = []
-        age = age_by.get(k, 1)
-        if leader_by.get(k) == code:
-            roles.append("龙头")
-        elif h >= 2:
-            roles.append("连板")
-        if h == 1 and age == 1:
-            roles.append("共振")
-        if h <= 2 and age >= 2 and dpos >= 1:
-            appeared = any((dates[dpos - i], code, k) in att_set
-                           for i in range(1, min(age, dpos + 1)))
-            if not appeared:
-                roles.append("补涨")
-        return roles
+    rctx = RoleContext(
+        leader_by=dict(zip(daytd["concept_code"], daytd["leader_code"])),
+        age_by=dict(zip(daytd["concept_code"], daytd["theme_age"])),
+        att_set=att_set, dates=dates, date=date)
 
     # 情绪
     yizi_n = int(day["is_yizi"].sum())
@@ -148,7 +126,7 @@ def build_review(date: str) -> dict:
         {"ts_code": r.ts_code, "name": r.name, "height": int(r.limit_times),
          "theme": r.concept_name if pd.notna(r.concept_name) else "-",
          "themes": _themes_of(r.ts_code, r.concept_name, touches, cname),
-         "roles": roles_of(r.ts_code, r.concept_code, int(r.limit_times)),
+         "roles": roles_of(rctx, r.ts_code, r.concept_code, int(r.limit_times)),
          "open_times": int(r.open_times), "first_time": str(r.first_time),
          "fd_amount": float(r.fd_amount) if pd.notna(r.fd_amount) else 0,
          "next_open_ret": (round(float(r.next_open_ret) * 100, 2)
@@ -218,7 +196,7 @@ def build_review(date: str) -> dict:
         {"ts_code": r.ts_code, "name": r.name, "height": int(r.limit_times),
          "theme": r.concept_name if pd.notna(r.concept_name) else "-",
          "themes": _themes_of(r.ts_code, r.concept_name, touches, cname),
-         "roles": roles_of(r.ts_code, r.concept_code, int(r.limit_times)),
+         "roles": roles_of(rctx, r.ts_code, r.concept_code, int(r.limit_times)),
          "theme_cnt": int(r.zt_cnt) if pd.notna(r.zt_cnt) else 0,
          "open_times": int(r.open_times), "first_time": str(r.first_time),
          "last_time": str(r.last_time),
