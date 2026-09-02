@@ -2,7 +2,7 @@
 """数据目录与统一查询层（唯一出处）
 
 目录规范: data/{域}/{频率}/{数据集}
-  域:   limitup 涨停 | theme 题材 | market 行情 | meta 基础
+  域:   limitup 涨停 | theme 题材 | market 行情 | factor 因子 | meta 基础
   频率: 1d 日频 | 1m 分钟 | static 无时间维度
   live/ 与 review/ 为盘中瞬态/缓存, 不入目录
 
@@ -35,6 +35,14 @@ DATASETS = {
     "limitup.events_enriched": (
         "limitup/1d/events_enriched.parquet", "1d", False,
         "事件富化: 一字板/T+1开高低收收益/ST标记"),
+    "limitup.kpl_events": (
+        "limitup/1d/kpl_events.parquet", "1d", False,
+        "开盘啦涨停/炸板事件库 tushare kpl_list 增量(含theme题材标注), "
+        "2024-01起; 历史18年以前段无数据"),
+    "limitup.ths_limit": (
+        "limitup/1d/ths_limit.parquet", "1d", False,
+        "同花顺涨停池榜单 tushare limit_list_ths 增量, 2023-11起; "
+        "含lu_desc涨停原因/tag板型/status封板状态/近一年封板率, 当日16点后可拉"),
     "limitup.zt_minute": (
         "limitup/1m/zt_minute_{date}.parquet", "1m", True,
         "当日封板组+炸板组(触板未封)标的1分钟K线, 东财源"),
@@ -44,6 +52,20 @@ DATASETS = {
     "theme.members": (
         "theme/static/members.parquet", "static", False,
         "概念成分快照(当前, 无日期维度)"),
+    "theme.em_boards": (
+        "theme/static/em_boards.parquet", "static", False,
+        "东财概念板块列表(研究25对照源快照)"),
+    "theme.em_members": (
+        "theme/static/em_members.parquet", "static", False,
+        "东财概念板块成分快照(研究25对照源)"),
+    "theme.kpl_concepts": (
+        "theme/static/kpl_concepts.parquet", "static", False,
+        "开盘啦题材板块列表 tushare kpl_concept(过滤噪音后), "
+        "concept_code为.KP代码"),
+    "theme.kpl_members": (
+        "theme/static/kpl_members.parquet", "static", False,
+        "开盘啦题材板块成分快照 tushare kpl_concept_cons(含入选原因"
+        "/人气值), 板块名即题材名"),
     "theme.attribution": (
         "theme/1d/attribution.parquet", "1d", False,
         "涨停事件×概念独占归属(迭代投票)"),
@@ -53,6 +75,10 @@ DATASETS = {
     "market.daily_panel": (
         "market/1d/daily_panel.parquet", "1d", False,
         "全A日度行情面板(涨跌幅/成交额/换手/涨停价), 约200MB"),
+    "factor.longtou": (
+        "factor/1d/longtou.parquet", "1d", False,
+        "龙头因子日表(研究22/23): 决策日×个股, 含炸板疤痕/行业地位/"
+        "量比/连跌+市场级zt/ld/ldlr/qscore/sscore"),
     "meta.trade_cal": (
         "meta/trade_cal.parquet", "static", False,
         "SSE交易日历缓存"),

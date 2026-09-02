@@ -9,6 +9,7 @@
 产物: market.daily_panel
   trade_date, ts_code, open, high, low, close, pre_close, pct_chg, open_ret, vol
   pct_chg = close/pre_close-1, open_ret = open/pre_close-1 (官方除权调整口径)
+  vol 统一为「手」(tushare口径); lab_333 原始 volume 是股, 载入时÷100
 """
 import os
 import sys
@@ -29,6 +30,8 @@ LAB333 = Path(os.environ["LAB333_DAILY_DIR"]) if os.environ.get("LAB333_DAILY_DI
 # 个股前缀: SSE 60x/68x, SZSE 00x/30x
 STOCK_PREFIX = {("SSE", "60"), ("SSE", "68"), ("SZSE", "00"), ("SZSE", "30")}
 EXCH_MAP = {"SSE": "SH", "SZSE": "SZ"}
+# lab_333 尾段畸变丢弃的交易日数(改用tushare补回, 见 load_lab333)
+TAIL_DROP = 5
 
 
 def load_lab333() -> pd.DataFrame:
@@ -53,7 +56,15 @@ def load_lab333() -> pd.DataFrame:
         if picked % 500 == 0:
             print(f"  已读 {picked} 只")
     panel = pd.concat(rows, ignore_index=True)
+    # lab_333 volume 单位是「股」, tushare补尾与下游口径统一为「手」(1手=100股);
+    # 不归一会在两段拼接处出现~100倍量能断层(日K量柱/量比y_volr5失真)
     panel = panel.rename(columns={"volume": "vol"})
+    panel["vol"] = panel["vol"] / 100.0
+    # lab_333 文件末尾数日 volume 还有个股畸变(实测0.92~1.76倍), 丢弃尾部
+    # TAIL_DROP 个交易日, 交由 fetch_tail 用 tushare 官方值补回
+    dates = sorted(panel["trade_date"].unique())
+    if len(dates) > TAIL_DROP:
+        panel = panel[panel["trade_date"] < dates[-TAIL_DROP]]
     # 前复权序列内 shift 得到 pre_close（跨历史除权日的比率=含权总收益，正确）
     panel = panel.sort_values(["ts_code", "trade_date"])
     panel["pre_close"] = panel.groupby("ts_code")["close"].shift(1)

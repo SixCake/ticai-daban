@@ -15,6 +15,8 @@ venv/
 
 # 密钥与本地环境
 .env
+# frp 隧道配置（含 auth.token / stcp secretKey，仅提交 .example 模板）
+build/frp*.toml
 
 # 系统文件
 .DS_Store

@@ -25,6 +25,10 @@ CONCEPT_NOISE_KEYWORDS = [
     "融资融券", "转融券", "注册制", "股权激励", "增持", "回购", "减持",
     "股权转让", "重组", "预增", "预亏", "预减", "扭亏", "业绩预告",
     "ST板块", "退市", "次新股", "新股", "解禁", "质押", "商誉",
+    # 超大规模属性/区域/政策概念（成分数百上千, 靠家数优势吞噬独占归属,
+    # 非叙事炒作: 国企改革1470/专精特新1231/一带一路790/西部大开发636等）
+    "国企改革", "专精特新", "证金持股", "一带一路", "西部大开发",
+    "湾区", "海峡两岸", "振兴", "自贸区", "人民币",
 ]
 
 
@@ -38,10 +42,25 @@ def _load_dotenv():
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+        v = v.split(" #")[0]                 # 容忍行内注释
+        v = v.strip().strip('"').strip("'")   # 容忍 export 风格的引号
+        os.environ.setdefault(k.strip(), v)
 
 
 _load_dotenv()
+
+# 题材分类源: kpl=开盘啦(默认, 2026-09 A/B验证: 未归属0.15%/最大簇占比23%,
+# 优于同花顺投票的1.25%/48%) | ths=同花顺概念(旧源, 保留供回滚对照)
+# 须在_load_dotenv()后读取, 保证.env中的CONCEPT_SOURCE可生效
+CONCEPT_SOURCE = os.environ.get("CONCEPT_SOURCE", "kpl").lower()
+
+# kpl题材事件标注回看窗口(交易日): 盘中延续法候选/触及层/动态成分均取
+# 近窗口内被开盘啦标注过的(股票,题材)对; 60日约一个炒作周期
+KPL_THEME_WINDOW = 60
+
+# 实时行情源: tx=腾讯http(默认) | qmt=大QMT(FormulaServer快路径, 见quotes/qmt.py)
+# 须在_load_dotenv()后读取, 保证.env中的QUOTE_SOURCE可生效
+QUOTE_SOURCE = os.environ.get("QUOTE_SOURCE", "tx").lower()
 
 
 def get_token() -> str:

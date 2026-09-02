@@ -1,0 +1,84 @@
+# ============================================================================
+# frp 隧道配置模板（局域网模式）
+# ----------------------------------------------------------------------------
+# 真实的 build/frp*.toml 含 auth.token / stcp secretKey，已在 .gitignore 中忽略。
+# 复制下面对应段落为 build/frps-lan.toml / frpc-lan.toml / frpc-win-lan.toml，
+# 再把占位符替换成自己的密钥即可。
+#
+# 拓扑：Mac(frps) <--> 家里 Windows(QMT 那台, frpc)
+#   Mac 侧 frps 监听 7000；Windows 侧 frpc 以 stcp 方式暴露 Redis 6379 与
+#   FormulaServer 58600（不占公网端口），Mac 侧再用 frpc 的 visitor 把这两个
+#   端口映射回本机 127.0.0.1:6379 / 127.0.0.1:58600。
+# ============================================================================
+
+
+# ---------------------------------------------------------------------------
+# [1] build/frps-lan.toml —— 跑在 Mac 上（局域网模式，不走云服务器）
+#     Mac 上运行: frps -c ~/frp/frps-lan.toml
+# ---------------------------------------------------------------------------
+# bindAddr = "0.0.0.0"
+# bindPort = 7000
+# auth.token = "your_frp_token_here"
+# log.to = "./frps-lan.log"
+# log.level = "info"
+# log.maxDays = 7
+
+
+# ---------------------------------------------------------------------------
+# [2] build/frpc-win-lan.toml —— 部署在家里 Windows PC（QMT 那台）
+#     serverAddr 指向 Mac 的局域网 IP；运行: frpc.exe -c frpc-win-lan.toml
+# ---------------------------------------------------------------------------
+# serverAddr = "192.168.x.x"        # Mac 的局域网 IP
+# serverPort = 7000
+# auth.token = "your_frp_token_here"
+# log.to = "./frpc-win-lan.log"
+# log.level = "info"
+# log.maxDays = 7
+#
+# # 把本机 Redis 6379 以 stcp 方式暴露（不占公网端口）
+# [[proxies]]
+# name = "win-redis"
+# type = "stcp"
+# secretKey = "your_redis_stcp_secret_here"
+# localIP = "127.0.0.1"
+# localPort = 6379
+#
+# # 把 FormulaServer 58600 以 stcp 方式暴露
+# [[proxies]]
+# name = "win-formula"
+# type = "stcp"
+# secretKey = "your_formula_stcp_secret_here"
+# localIP = "127.0.0.1"
+# localPort = 58600
+
+
+# ---------------------------------------------------------------------------
+# [3] build/frpc-lan.toml —— Mac 上用（局域网访客端）
+#     与云上 frpc.toml 唯一区别：serverAddr 从云服务器改为 Mac 本机
+#     跑：frpc -c ~/frp/frpc-lan.toml
+#     之后 Mac 本机 127.0.0.1:6379 / 127.0.0.1:58600 = 家里 Windows
+# ---------------------------------------------------------------------------
+# serverAddr = "127.0.0.1"
+# serverPort = 7000
+# auth.token = "your_frp_token_here"
+# log.to = "./frpc-lan.log"
+# log.level = "info"
+# log.maxDays = 7
+#
+# # 访客身份访问 Windows 的 Redis
+# [[visitors]]
+# name = "mac-redis"
+# type = "stcp"
+# serverName = "win-redis"
+# secretKey = "your_redis_stcp_secret_here"
+# bindAddr = "127.0.0.1"
+# bindPort = 6379
+#
+# # 访客身份访问 Windows 的 FormulaServer
+# [[visitors]]
+# name = "mac-formula"
+# type = "stcp"
+# serverName = "win-formula"
+# secretKey = "your_formula_stcp_secret_here"
+# bindAddr = "127.0.0.1"
+# bindPort = 58600

@@ -9,14 +9,28 @@ if [ -z "$PY" ]; then
 fi
 echo "==> 增量拉取涨停事件"
 "$PY" collect/fetch_limit_events.py
+echo "==> 增量拉取开盘啦事件(kpl题材标注, T+1)"
+"$PY" collect/fetch_kpl_events.py || echo "kpl事件拉取失败(归属降级延续法)"
+echo "==> 开盘啦题材板块+成分快照(kpl宇宙)"
+"$PY" collect/fetch_kpl_concepts.py || echo "kpl成分拉取失败(雷达宇宙沿用旧快照)"
+echo "==> 增量拉取同花顺涨停池榜单(涨停原因/板型/封板状态, 当日16点后可得)"
+"$PY" collect/fetch_ths_limit.py || echo "同花顺榜单拉取失败(复盘涨停原因降级为开盘啦兜底)"
+echo "==> 全A日线面板补尾(tushare, 先于富化让昨日事件可算T+1)"
+"$PY" collect/fetch_daily_panel.py || echo "面板补尾失败(富化/因子沿用旧面板)"
 echo "==> 重建事件富化(一字板/T+1收益)"
 "$PY" build/enrich_events.py
 echo "==> 重建题材归属"
 "$PY" build/attribute.py
 echo "==> 重建题材日度快照"
 "$PY" build/theme_daily.py
+echo "==> 申万行业分类映射(一级/二级, 供雷达分级聚合)"
+"$PY" collect/fetch_sw.py || echo "申万映射失败(雷达申万聚合沿用旧sw_map)"
+echo "==> 龙头因子日表构建(研究22/23: qscore/sscore/环境)"
+"$PY" collect/factor_longtou.py || echo "龙头因子构建失败(看板因子列降级为空)"
 echo "==> 雷达轨迹标注(挂涨停结果/首封时间)"
 "$PY" apps/label_radar.py
+echo "==> 复盘快照生成(最新交易日)"
+"$PY" apps/review.py || echo "复盘快照生成失败(服务端可现场构建)"
 echo "==> 涨停/触板标的1分钟线采集(东财当日深度, 供研究06)"
 "$PY" collect/fetch_zt_minute.py --max-days 2 || echo "分钟线采集失败(不影响主流程)"
 echo "==> 完成"

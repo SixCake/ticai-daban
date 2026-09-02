@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """腾讯实时行情 qt.gtimg.cn (60只/批, GBK)
 
-字段: f[1]名称 f[3]现价 f[4]昨收 f[32]涨幅% f[37]成交额(万) f[38]换手%
-      f[44]流通市值(亿) f[47]涨停价 f[49]量比
-用途: 雷达全量扫描、盘中题材中军识别
+字段: f[1]名称 f[3]现价 f[4]昨收 f[32]涨幅% f[33]最高 f[34]最低
+      f[37]成交额(万) f[38]换手% f[44]流通市值(亿) f[47]涨停价 f[49]量比
+用途: 雷达全量扫描、盘中题材中军识别、龙头短板盘中收盘位置
 """
 import urllib.request
 
@@ -33,6 +33,9 @@ def fetch_quotes(codes: list[str]) -> dict:
             try:
                 out[to_ts_code(sym.replace("v_", ""))] = {
                     "name": f[1], "price": float(f[3]),
+                    "open": float(f[5]) if f[5] else 0.0,
+                    "high": float(f[33]) if f[33] else 0.0,
+                    "low": float(f[34]) if f[34] else 0.0,
                     "pct": float(f[32]), "amount": float(f[37]) * 1e4,
                     "float_mv": float(f[44]) * 1e8,
                     "vr": float(f[49]) if f[49] else 0.0,

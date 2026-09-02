@@ -50,7 +50,7 @@ def stock_prob(quotes: dict, heat_by: dict, stock2con: dict,
                      "tover": round(q["tover"], 2),
                      "heat": round(heat, 1),
                      "hk": hk,
-                     "theme": cname.get(hk, "-") if hk else "-",
+                     "theme": cname.get(hk, hk) if hk else "-",
                      "near": near})
     rows.sort(key=lambda x: -x["prob"])
     return rows
