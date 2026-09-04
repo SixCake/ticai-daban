@@ -1,7 +1,7 @@
 #!/bin/bash
 # 停止监控平台（pid文件 + 进程名兜底，确保无残留）
 cd "$(dirname "$0")"
-for f in logs/poller.pid logs/server.pid logs/radar.pid logs/sim.pid; do
+for f in logs/poller.pid logs/server.pid logs/radar.pid logs/sim.pid logs/aifeed.pid; do
   if [ -f "$f" ]; then
     pid=$(cat "$f")
     if kill -0 "$pid" 2>/dev/null; then

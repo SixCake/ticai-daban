@@ -46,6 +46,18 @@ else
   echo "预警雷达已启动 PID $! (日志 logs/radar.log)"
 fi
 
+# AI Feed 生产者(ADR-0003): 盘中持续产出 feed 文件供策略 ai_feed() 订阅。
+# 追加式产出 + 时间戳闸门, 回测读同一批文件 → 确定性可重放。
+if [ -f apps/ai_feed.py ]; then
+  if [ -f logs/aifeed.pid ] && kill -0 "$(cat logs/aifeed.pid)" 2>/dev/null; then
+    echo "AI Feed 生产者已在运行 PID $(cat logs/aifeed.pid)"
+  else
+    nohup "$PY" -u apps/ai_feed.py --loop >> logs/aifeed.log 2>&1 &
+    echo $! > logs/aifeed.pid
+    echo "AI Feed 生产者已启动 PID $! (日志 logs/aifeed.log)"
+  fi
+fi
+
 # 策略模拟(rqalpha): 按 strategies/strategies.yaml 启用清单拉起 N 个策略进程。
 # 仅在 apps/sim.py 存在且 rqalpha 可导入时启动, 否则跳过(不阻塞主链路)。
 if [ -f apps/sim.py ] && "$PY" -c "import rqalpha" 2>/dev/null; then
