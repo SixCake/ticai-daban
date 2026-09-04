@@ -11,10 +11,15 @@ is_yizi/is_st字段, 由池自身过滤承担）。
 """
 import pandas as pd
 
+from core.times import is_before
+
 
 def reality_mask(df: pd.DataFrame) -> pd.Series:
-    """无前视现实格: 大热点+炸板早回封+午前+炸板≤3"""
-    lastm = df["last_time"].astype(str).str.zfill(6)
+    """无前视现实格: 大热点+炸板早回封+午前+炸板≤3
+    封板时间比较走 core/times.py: 缺失一律判 False, 不随 pandas 版本漂移。
+    原写法 `lastm < '140000'` 与 `lastm <= '110000'` 双条件中后者恒更严,
+    前者无独立作用, 故合并为单一午前判据(结果等价)。"""
     return ((df["zt_cnt"] >= 8) & (df["open_times"] >= 1) &
-            (df["open_times"] <= 3) & (lastm < "140000") &
-            (lastm <= "110000") & (~df["is_yizi"]) & (~df["is_st"]))
+            (df["open_times"] <= 3) &
+            is_before(df["last_time"], "110000") &
+            (~df["is_yizi"]) & (~df["is_st"]))

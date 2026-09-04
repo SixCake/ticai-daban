@@ -1,0 +1,16 @@
+# 策略注册表 — apps/sim.py 按此清单拉起策略进程
+#
+# 一策略一进程一账户: sim.py 为每条 enabled=true 的记录起一个 rqalpha 子进程,
+# 各自独立账户/独立落盘(data/sim/state/{strategy}/), 一个策略报错不拖垮其他。
+#
+# 每个策略的详细配置在自己的 strategies/<strategy>/config.yaml 里。
+# 本文件只管"启用哪些"与"启动顺序"。
+
+strategies:
+  - name: v5_daban
+    enabled: true
+    description: V5 两层打板（结构闸选股 + 融合分排序），移植自 research/jq_v5_strategy.py
+
+  - name: _template
+    enabled: false        # 模板不参与运行，仅供复制
+    description: 策略模板骨架

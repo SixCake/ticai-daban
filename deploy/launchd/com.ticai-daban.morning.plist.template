@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 题材打板监控平台 · 工作日盘前自启（模板）
+
+本文件是模板, 由 deploy/launchd/install.sh 渲染占位符后写入
+~/Library/LaunchAgents/, 请勿手工编辑安装后的副本（下次 install 会覆盖）。
+
+为什么必须盘前拉起: apps/radar._auc_capture 的竞价量只在 09:25:00~09:29:59
+可采（该时段无连续竞价成交, tick 当日累计量即竞价量; 09:30 后混入盘中成交
+永久不可分离）。QMT 推送订阅需要预热, 推送未就绪时竞价时段会走日 bar 降级、
+把上一交易日的收盘/涨幅/涨停价当成当日竞价行情。默认 09:10 启动留 15 分钟
+预热窗口, 可用 AUTOSTART_AT 调整。
+
+Weekday 固定 1~5（A股仅周一至周五交易）; 非交易日由 start.sh 拉起的进程
+自行休眠（core.calendar.is_trading_hours / is_polling_hours 判定）。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL}}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{PROJECT_DIR}}/start.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{{PROJECT_DIR}}</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+    </array>
+    <!-- 不在 load 时立即启动: 收盘后安装不应拉起盘中进程 -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{{PROJECT_DIR}}/logs/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{PROJECT_DIR}}/logs/launchd.log</string>
+</dict>
+</plist>

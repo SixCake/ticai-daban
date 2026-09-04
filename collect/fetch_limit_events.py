@@ -11,6 +11,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import START_DATE, get_pro
+from core.times import hhmmss6
 from datastore import path_of
 
 pro = get_pro()
@@ -66,8 +67,11 @@ def main():
         new = pd.concat(buf, ignore_index=True)
         new["name"] = new["name"].astype(str)
         new["is_st"] = new["name"].str.contains("ST", case=False, na=False)
-        new["first_time"] = new["first_time"].astype(str).str.zfill(6)
-        new["last_time"] = new["last_time"].astype(str).str.zfill(6)
+        # 封板时间走 core/times.py: tushare limit_list_d 的 first_time/
+        # last_time 实测缺失率 10.7%/20%(炸板未封记录), 裸 astype(str)
+        # 在 pandas 2.x 下会写成 '000nan'/'00None' 污染下游
+        new["first_time"] = hhmmss6(new["first_time"])
+        new["last_time"] = hhmmss6(new["last_time"])
         merged = (pd.concat([existing, new], ignore_index=True)
                   if existing is not None else new)
         merged = merged.drop_duplicates(subset=["trade_date", "ts_code"])

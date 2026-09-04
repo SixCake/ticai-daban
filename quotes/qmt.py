@@ -2,14 +2,18 @@
 """大QMT实时行情适配层（与 quotes/tx.py 同契约, QUOTE_SOURCE=qmt 时启用）
 
 链路: 盘中实时 = subscribe_whole_quote 推送(Redis pubsub, 增量累积);
-      盘前/收盘/推送陈旧 = FormulaServer快路径日bar横截面降级。
+      盘前(竞价开始前) = FormulaServer快路径日bar横截面降级。
+      当日(09:15~收盘尾段)禁止日bar降级: 服务端日bar不落当日数据,
+      降级会把上一交易日的收盘/涨幅/涨停价当成当日数据(见_bar_fallback_ok)。
 连接配置全部来自环境变量 BIGQMT_*（~/.zshrc 或 .env, qmt-net lan/frp 切换
 只改 BIGQMT_REDIS_HOST/BIGQMT_FORMULA_HOST, 本文件零改动跨网络）。
 
 字段口径对齐腾讯源:
   price/pct  ← tick lastPrice/lastClose（降级时: 日bar最新/次新close）
   amount(元) ← tick当日累计成交额
-  vr(量比)   ← 今日每分钟均量 / 近5日每分钟均量（近5日量每日缓存一次）
+  volume(股) ← tick当日累计成交量(竞价时段即竞价量, 供竞价量比)
+  vr(量比)   ← 今日每分钟均量 / 近5日每分钟均量（近5日量每日缓存一次）;
+                竞价时段 emin=1 → 即竞价量比, 与 stk_auction 同口径
   limit_px   ← 昨收×涨幅上限取2位（主板10% / 创业板·科创20% / ST 5%）
   float_mv/tover ← 实时链路不消费(热度/概率/中军均不用), 恒置0;
                    tushare float_mv/float_share 需更高积分, 不引入依赖
@@ -149,8 +153,14 @@ def _limit_ratio(code: str, name: str) -> float:
 
 
 def _elapsed_min(now: datetime) -> float:
-    """已进行的交易分钟数（9:30-11:30 + 13:00-15:00, 全天240）"""
+    """已进行的交易分钟数（9:30-11:30 + 13:00-15:00, 全天240）
+    竞价时段(09:25~09:30)计1分钟: 此时尚无连续竞价成交, 当日累计量
+    就是竞价量, 量比=竞价量/近5日每分钟均量 —— 与 tushare
+    stk_auction.volume_ratio 同口径(实测反推验证一致)。原本返0使
+    竞价时段量比恒为0, 竞价量爆因子无法计算。"""
     hm = now.hour * 60 + now.minute
+    if 9 * 60 + 25 <= hm < 9 * 60 + 30:
+        return 1.0
     am = max(0.0, min(hm, 11 * 60 + 30) - (9 * 60 + 30))
     pm = max(0.0, min(hm, 15 * 60) - 13 * 60)
     return am + pm
@@ -164,7 +174,18 @@ def _elapsed_min(now: datetime) -> float:
 _push = {"ticks": {}, "ts": 0.0}
 _push_lock = threading.Lock()
 _push_started = False
-PUSH_FRESH = 60.0    # 推送新鲜度阈值(秒), 超过降级日bar横截面
+PUSH_FRESH = 60.0    # 推送新鲜度阈值(秒), 超过则本票缺行情(不降级日bar)
+
+
+def _bar_fallback_ok(now: datetime) -> bool:
+    """日bar横截面降级只在竞价开始前(<09:15)有效。
+    QMT服务端日bar不落当日数据(实测可滞后多个交易日), 只要进入当日
+    (09:15后, 含15:00~15:05收盘尾段)降级就会把"上一交易日的收盘价/
+    涨幅/涨停价/全天成交额"当成当日行情:
+    2026-09-03推送订阅未就绪→09:25~09:30全市场用8/27日bar, 产出1917条
+    伪S1(昨日涨幅当竞价涨幅)与155条伪S2(轨迹断层当颠簸加速), 涨停价错配
+    还使封板判定全线误报。当日宁可返回空由调用方兜底腾讯源。"""
+    return now.hour * 60 + now.minute < 9 * 60 + 15
 
 
 def _on_quote(data):
@@ -321,7 +342,7 @@ def fetch_quotes(codes: list[str]) -> dict:
                 miss.append(c)
     else:
         miss = list(codes)
-    if miss and emin <= 0:                    # 盘前/收盘: 日bar横截面口径有效
+    if miss and _bar_fallback_ok(datetime.now()):  # 真盘前/收盘: 日bar口径有效
         res = _snapshot(miss)
         wanted = set(miss)
         today = datetime.now().strftime("%Y%m%d")

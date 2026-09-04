@@ -75,6 +75,10 @@ DATASETS = {
     "market.daily_panel": (
         "market/1d/daily_panel.parquet", "1d", False,
         "全A日度行情面板(涨跌幅/成交额/换手/涨停价), 约200MB"),
+    "market.index_panel": (
+        "market/1d/index_panel.parquet", "1d", False,
+        "指数日度面板 tushare index_daily(沪深300/中证全指/上证/创业板指), "
+        "供 rqalpha_mod_ticai 作宽基基准; 缺失则框架仅提供 DBBNCH 打板基准"),
     "factor.longtou": (
         "factor/1d/longtou.parquet", "1d", False,
         "龙头因子日表(研究22/23): 决策日×个股, 含炸板疤痕/行业地位/"

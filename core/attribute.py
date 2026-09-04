@@ -64,7 +64,7 @@ def load_con2stock() -> dict:
 
 def attribute_day(codes: list[str], stock2con: dict, msize: dict):
     """单日独占归属, 返回 ({ts_code: concept_code}, 迭代轮数)"""
-    raw_cnt = defaultdict(int)          # 归属前每概念触及家数
+    raw_cnt = defaultdict(int)          # 归属前每概念关联家数
     cand = {}
     for c in codes:
         cons = stock2con.get(c, [])
@@ -99,9 +99,9 @@ def attribute_day(codes: list[str], stock2con: dict, msize: dict):
 
 
 def touch_map(codes: list[str], stock2con: dict, msize: dict):
-    """多概念触及层(展示用, 不参与独占统计): 每股 → 当日有涨停出现的全部
-    成分题材概念。返回 (raw_cnt: {概念: 触及家数}, touches: {股票: [概念,...]}),
-    touches 按触及家数降序 → 成分数小 → 代码升序。"""
+    """多概念关联层(展示用, 不参与独占统计): 每股 → 当日有涨停出现的全部
+    成分题材概念。返回 (raw_cnt: {概念: 关联家数}, touches: {股票: [概念,...]}),
+    touches 按关联家数降序 → 成分数小 → 代码升序。"""
     raw_cnt = defaultdict(int)
     cons_of = {}
     for c in codes:
@@ -274,9 +274,9 @@ def attribute_day_kpl(date: str, codes: list[str]):
 
 
 def touch_map_kpl(date: str, codes: list[str]):
-    """kpl口径触及层: 当日全部theme标注(直标) / 近窗口标注并集(盘中)
+    """kpl口径关联层: 当日全部theme标注(直标) / 近窗口标注并集(盘中)
     返回 (raw_cnt, touches) 与 touch_map 同契约。raw_cnt仅统计涨停
-    tag事件(保持「涨停触及」语义, 与poller/theme_daily口径一致);
+    tag事件(保持「涨停关联」语义, 与poller/theme_daily口径一致);
     touches含涨停+炸板全部标注, 按窗口内标注家数降序→题材名升序"""
     day = _kpl_events()
     day = day[day["trade_date"] == date]
@@ -322,7 +322,7 @@ def attribute_of(date: str, codes: list[str], stock2con: dict | None = None,
 
 def touches_of(date: str, codes: list[str], stock2con: dict | None = None,
                msize: dict | None = None):
-    """触及层统一入口: 返回 (raw_cnt, touches)"""
+    """关联层统一入口: 返回 (raw_cnt, touches)"""
     if CONCEPT_SOURCE == "kpl":
         return touch_map_kpl(date, codes)
     if stock2con is None or msize is None:

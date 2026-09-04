@@ -1,6 +1,17 @@
-pandas>=2.0
+# pandas 上界由 rqalpha 决定: rqalpha 声明 pandas<3.0.0, 故锁 2.x。
+# 降级可行性已实测(research/verify_pandas_env.py): 项目375处pandas用法
+# 零命中 pandas 3.0 独有 API, parquet 读写与 akshare/tushare 接口无损。
+pandas>=2.0,<3.0
 numpy>=1.24
 tushare>=1.4
 pyarrow>=14.0
 akshare>=1.12
 redis>=5.0  # QUOTE_SOURCE=qmt 实时链路需要
+requests>=2.28
+
+# 策略模拟框架引擎(rqalpha_mod_ticai 依赖)
+# 需 rqrisk/h5py/logbook/jsonpickle 等, 由 pip 自动带入
+rqalpha>=6.3
+
+# research/ 部分因子脚本用到; 主链路不需要
+scikit-learn>=1.3

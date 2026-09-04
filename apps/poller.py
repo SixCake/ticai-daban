@@ -12,7 +12,7 @@
 import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -30,6 +30,7 @@ from core.roles import RoleContext, roles_of  # noqa: E402
 from core.shortboard import (HB_LIMIT, N_WINDOW, PEAK_WIN, STATE_ORDER,  # noqa: E402
                             STATE_RISK, build_cohort, shortboard_snapshot,
                             shortboard_state_of)
+from core.times import is_before  # noqa: E402
 from datastore import load, path_of, save  # noqa: E402
 from quotes import fetch_quotes  # noqa: E402  # QUOTE_SOURCE分发: tx|qmt
 from quotes.tx import fetch_quotes as fetch_quotes_tx  # noqa: E402  # qmt失败兜底
@@ -52,17 +53,26 @@ def load_industry_map() -> dict:
 IND_MAP = load_industry_map()
 
 
+# 日历缓存前向余量(天): meta.trade_cal 同时被 collect/factor_longtou 的
+# next_trade_date 用于定「panel末日的下一交易日」(尾行), horizon 只到当日
+# 会让尾行静默丢失 → 因子表滞后一决策日。
+CAL_HORIZON_DAYS = 30
+
+
 def trade_days_upto(end: str) -> list[str]:
+    """[2019, end] 的交易日; 缓存按 end+CAL_HORIZON_DAYS 前向拉取"""
     cache = path_of("meta.trade_cal")
     if cache.exists():
         days = load("meta.trade_cal")["cal_date"].tolist()
         if days and days[-1] >= end:
             return [d for d in days if d <= end]
-    cal = pro.trade_cal(exchange="SSE", start_date="20190101", end_date=end,
-                        is_open="1")
+    horizon = (datetime.strptime(end, "%Y%m%d")
+               + timedelta(days=CAL_HORIZON_DAYS)).strftime("%Y%m%d")
+    cal = pro.trade_cal(exchange="SSE", start_date="20190101",
+                        end_date=horizon, is_open="1")
     days = sorted(cal["cal_date"].tolist())
     save("meta.trade_cal", cal)
-    return days
+    return [d for d in days if d <= end]
 
 
 _prev_state_cache: dict = {}
@@ -316,12 +326,14 @@ class DayState:
 
         heights = pool["连板数"].max() if len(pool) else 0
         # 分歧/一致维度(研究28仓位驱动): 炸板率=分歧; 一字代理+缩量加速=一致
+        # 封板时间比较走 core/times.py: 缺失判 False, 避免 pandas 版本间
+        # astype(str) 对 NA 的表述差异('000nan' <= '094500' 会误判为 True)
         n_pool = len(pool)
         accel = float(((pool["炸板次数"] == 0)
-                       & (pool["first_time"].astype(str) <= "094500")).mean()) \
+                       & is_before(pool["first_time"], "094500")).mean()) \
             if n_pool else 0.0
         yizi_proxy = float(
-            (pool["first_time"].astype(str) <= "093000").mean()) \
+            is_before(pool["first_time"], "093000").mean()) \
             if n_pool else 0.0
         sentiment = {
             "zt_count": len(pool), "exit_count": self.exit_count,

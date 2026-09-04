@@ -17,6 +17,7 @@
   python label_radar.py 20260825 000017.SZ   # 追溯单只分钟级轨迹
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -26,6 +27,17 @@ from config import DATA  # noqa: E402
 from datastore import load  # noqa: E402
 
 LIVE = DATA / "live"
+_LOG_RE = re.compile(r"^radar_log_(\d{8})\.jsonl$")
+
+
+def _latest_log_date() -> str | None:
+    """最新雷达日志日; 只认真名 radar_log_YYYYMMDD.jsonl
+
+    repair 脚本会留 .pre_repair.jsonl 备份, 该名字按字典序排在正式日志之后,
+    若不过滤则日期被解析成 'repair' 而整日标注被跳过。"""
+    days = [m.group(1) for f in LIVE.glob("radar_log_*.jsonl")
+            if (m := _LOG_RE.match(f.name))]
+    return max(days) if days else None
 
 
 def _sec(t) -> int:
@@ -70,6 +82,12 @@ def label(date: str) -> list[dict]:
         print(f"标注 {date}: 无雷达日志")
         return []
     oc, src = _outcomes(date)
+    if src == "none":
+        # 盘中跑时 events 尚无当日行且 latest.json 已被次日覆盖 → 所有 zt
+        # 会被误标为 False, 写入后污染下游概率/sscore 校准统计。宁可不写。
+        print(f"标注 {date}: 结果标签源缺失(events 无当日行且 latest.json 非当日)"
+              f" → 跳过写盘以免污染校准统计; 先跑 daily_update.sh 后重试")
+        return []
     g: dict = {}
     for r in recs:
         c = r["code"]
@@ -158,7 +176,6 @@ if __name__ == "__main__":
     else:
         date = sys.argv[1] if len(sys.argv) > 1 else None
         if not date:
-            logs = sorted(LIVE.glob("radar_log_*.jsonl"))
-            date = logs[-1].stem.split("_")[-1] if logs else None
+            date = _latest_log_date()
         if date:
             label(date)

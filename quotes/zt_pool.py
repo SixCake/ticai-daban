@@ -8,6 +8,7 @@ import time
 import pandas as pd
 
 from core.codes import ts_code_of
+from core.times import hhmmss6
 
 
 def fetch_pool(date: str) -> pd.DataFrame | None:
@@ -23,9 +24,12 @@ def fetch_pool(date: str) -> pd.DataFrame | None:
 
 
 def norm_pool(df: pd.DataFrame) -> pd.DataFrame:
-    """归一化: 补 ts_code / first_time / last_time(6位字符串)"""
+    """归一化: 补 ts_code / first_time / last_time(6位字符串)
+    封板时间走 core/times.py 使缺失保持 NA — 否则 pandas 2.x 下会得
+    '000nan', 而下游 apps/poller.py 用字符串比较算早封板占比时
+    '000nan' <= '094500' 为 True → 未封板票被误算成早封板。"""
     p = df.copy()
     p["ts_code"] = p["代码"].astype(str).str.zfill(6).map(ts_code_of)
-    p["first_time"] = p["首次封板时间"].astype(str).str.zfill(6)
-    p["last_time"] = p["最后封板时间"].astype(str).str.zfill(6)
+    p["first_time"] = hhmmss6(p["首次封板时间"])
+    p["last_time"] = hhmmss6(p["最后封板时间"])
     return p

@@ -13,12 +13,19 @@
      - 10cm 且 gap≥5.2 且 开盘3min回撤odip≤0.05 (前向89%封板)
        叠加昨日收强(y_cpos>0.6)时标记+: 92%封板, EV+4.47%(研究16)
      - 10cm 且 gap≤5.2 且 开盘3min振幅amp3>4.3 (前向64%封板)
-     - 10cm 且 量比截面分位vr_pct≥0.95(竞价量爆)
+     - 10cm 且 量比截面分位vr_pct≥0.95(开盘量爆)
        研究30实盘复核: 原绝对阈值 vr≥5 口径失效(生产vr=今日每分钟
-       均量/近5日每分钟均量, 开盘20min内中位数7.4、vr≥5占73%),
+       均量/近5日每分钟均量, 开盘20min内中位数7.4、vr≥5叠73%),
        导致该分支占全部S3的98%且封板率3.7%低于宇宙基线6.9%(反向);
        改用同快照横截面分位后, 样本外最优档(0.68~1.00)封板率13.2%
        vs 档1 4.9%。
+       注: 本分支原名"竞价量爆"已改名为"开盘量爆"——它在09:34取样,
+       用的是盘中量比而非竞价量比; 真正的竞价量比另走影子字段。
+
+竞价口径分离(2026-09-03事故后定稿):
+  竞价涨幅(gap)优先从竞价快照取(当日open口径, 全天可取、出处确定);
+  无快照时才回退到 hist[0](雷达首轮轨迹点), 因为盘中重启/行情源
+  故障时 hist[0] 可能不是竞价样本 → gap 与一字板判定全错。
 
 口径换算: hist为20s粒度, pathvol(1min口径阈值0.93/0.5)按
 sqrt(20/60)换算到20s粒度; r3/accel与bar粒度无关, 阈值原样。
@@ -36,8 +43,9 @@ PV_MID = 0.50 * SCALE         # ≈0.29
 R3_BURST = 4.8                # 仅存档: 暴拉已按EV证伪, 不再触发信号
 ACCEL_HOT = 4.0
 VR_OPEN_HOT = 5.0             # 仅存档: 绝对量比阈值已证失效(研究30)
-VR_PCT_HOT = 0.95             # S3 竞价量爆改用同快照横截面分位
+VR_PCT_HOT = 0.95             # S3 开盘量爆用同快照横截面分位
 VR_PCT_MIN_N = 20             # 截面样本不足时不触发(宁缺不滥)
+VR_PCT_MIN_PCT = 2.0          # S3 分位排名域下限(研究30口径, 勿改)
 
 
 def cm20(code: str) -> bool:
@@ -51,6 +59,16 @@ ODIP_TIGHT = 0.05             # S3 开盘回撤上限
 AMP3_HOT = 4.3                # S3 开盘3min振幅下限
 GAP_WIN = (9 * 3600 + 34 * 60, 9 * 3600 + 50 * 60)  # S3判定时间窗
 _alerted: dict = {}           # (date, code) -> set(stages)
+
+
+def prime_alerted(date: str, keys) -> None:
+    """重启回载当日信号后预置已报集合。
+    _alerted 只在内存, 重启后为空 → build_signals 会对已落盘的信号重报,
+    而 radar 无条件覆盖 _presig_day[key] → 原触发时刻/触发价/买入价/
+    封板事件流全部丢失。回载后必须调用本函数封口。
+    keys: [(code, stage), ...]"""
+    for c, stage in keys:
+        _alerted.setdefault((date, c), set()).add(stage)
 
 
 def _series(hist: deque, t: float, secs: int) -> list:
@@ -86,12 +104,15 @@ def _sec_of_day(ts: float) -> int:
     return d.hour * 3600 + d.minute * 60 + d.second
 
 
-def _vr_pct(quotes: dict) -> dict:
+def vr_pct(quotes: dict, min_pct: float = VR_PCT_MIN_PCT) -> dict:
     """同快照横截面量比分位 {code: 0~1}。
-    口径与研究30一致: 仅在涨幅≥2%且vr>0的非ST/北交所票内排名。
-    截面样本不足时返回空字典(分位恒0 → 该分支不触发)。"""
+    口径与研究30一致: 仅在涨幅≥min_pct且vr>0的非ST/北交所票内排名。
+    截面样本不足时返回空字典(分位恒0 → 该分支不触发)。
+    min_pct 可配: S3 开盘量爆传2.0(研究30原口径勿改), 竞价闸传1.0
+    (S1候选域——若用2.0域则gap∈[1,2)的票分位恒0自动不过闸,
+    等于悄悄把竞价闸变成2%门槛)。"""
     vals = sorted(q["vr"] for c, q in quotes.items()
-                  if q.get("vr", 0) > 0 and q["pct"] >= 2
+                  if q.get("vr", 0) > 0 and q["pct"] >= min_pct
                   and "ST" not in q["name"] and not c.endswith(".BJ"))
     if len(vals) < VR_PCT_MIN_N:
         return {}
@@ -100,13 +121,15 @@ def _vr_pct(quotes: dict) -> dict:
 
 
 def build_signals(hist_by: dict, quotes: dict, t: float,
-                  date: str, yest_cpos: dict | None = None) -> list:
+                  date: str, yest_cpos: dict | None = None,
+                  auction: dict | None = None) -> list:
     """扫描全部行情, 输出前向预警列表(按强度降序)。
     hist_by: {code: deque[(epoch, pct)]} 雷达20s轨迹
     quotes: {code: 行情dict} 当前快照
-    yest_cpos: {code: 昨日收盘位置0-1} 可选, S3叠加标记用"""
+    yest_cpos: {code: 昨日收盘位置0-1} 可选, S3叠加标记用
+    auction: {code: {gap,...}} 竞价快照 可选, S3高开幅度优先取此"""
     out = []
-    vrp = _vr_pct(quotes)          # 量比截面分位(S3竞价量爆用)
+    vrp = vr_pct(quotes)           # 量比截面分位(S3开盘量爆用)
     for c, q in quotes.items():
         if "ST" in q["name"] or c.endswith(".BJ"):
             continue
@@ -125,7 +148,10 @@ def build_signals(hist_by: dict, quotes: dict, t: float,
             first_ts, first_p = hist[0]
             if _sec_of_day(first_ts) <= 9 * 3600 + 32 * 60:
                 head = list(hist)[:4]
-                gap = first_p
+                # 竞价涨幅优先取竞价快照(出处确定); 无快照才用首轮轨迹点
+                ag = (auction or {}).get(c)
+                gap = (ag["gap"] if ag and ag.get("gap") is not None
+                       else first_p)
                 hi3 = max(p for _, p in head)
                 odip = hi3 - pct
                 amp3 = hi3 - min(p for _, p in head)
@@ -135,7 +161,7 @@ def build_signals(hist_by: dict, quotes: dict, t: float,
                 elif gap <= GAP_BIG and amp3 > AMP3_HOT:
                     why3.append("高开剧震")
                 elif vrp.get(c, 0.0) >= VR_PCT_HOT:
-                    why3.append("竞价量爆")
+                    why3.append("开盘量爆")
                 if why3:
                     done.add("S3")
                     s = _mk("S3", c, q, hist, t, why3[0])
@@ -174,13 +200,14 @@ def build_signals(hist_by: dict, quotes: dict, t: float,
 
 
 def zt_shape_of(code: str, hist, q: dict, open_px: float = 0.0,
-                open_traj=None):
+                open_traj=None, auc_gap: float | None = None):
     """已封板票的涨停形态与模型归属分类。
     返回 (形态, 模式) 或 None(未封板/无数据)。
     形态: 一字板/高开稳封/高开剧震封板/高开拉升封板/颠簸拉升封板/平拉封板
     模式: 对应 S3稳封相/S3剧震/S2颠簸高(半路)/组外未标记/不可捕捉
     open_px: 当日开盘价(轨迹缺失时的补救源)
-    open_traj: 开盘窗口轨迹[[epoch,pct],...] (雷达落盘回载, 重启不丢)"""
+    open_traj: 开盘窗口轨迹[[epoch,pct],...] (雷达落盘回载, 重启不丢)
+    auc_gap: 竞价涨幅(竞价快照口径), 高开/一字判定的首选出处"""
     lp = q.get("limit_px", 0)
     if lp <= 0 or q["price"] < lp * 0.995:
         return None
@@ -192,6 +219,12 @@ def zt_shape_of(code: str, hist, q: dict, open_px: float = 0.0,
         d = _dt.datetime.fromtimestamp(float(ts))
         return d.hour * 60 + d.minute <= 9 * 60 + 32
 
+    # 高开幅度出处优先级: 竞价快照 > 当日open价推算 > 轨迹首点。
+    # 盘中重启/行情源故障时 samples[0] 可能不是竞价样本 → 会把非一字板
+    # 误判成一字板(2026-09-03事故: 陈旧日bar被当成竞价行情)
+    if auc_gap is None and open_px > 0 and lp > 0:
+        auc_gap = (open_px / (lp / (1 + ratio)) - 1) * 100
+
     samples, src = [], ""
     live = list(hist) if hist else []
     if len(live) >= 3 and _ts_ok(live[0][0]):
@@ -199,16 +232,14 @@ def zt_shape_of(code: str, hist, q: dict, open_px: float = 0.0,
     elif open_traj and _ts_ok(open_traj[0][0]):
         samples, src = [(float(ts), float(p)) for ts, p in open_traj], "open"
     if not samples:
-        # 开盘轨迹缺失且无回载: 用当日open价补救高开/一字判定
-        if open_px > 0 and lp > 0:
-            pre = lp / (1 + ratio)
-            gap = (open_px / pre - 1) * 100
-            if gap >= limit_pct * 0.97:
+        # 开盘轨迹缺失且无回载: 只能靠竞价涨幅粗判高开/一字
+        if auc_gap is not None:
+            if auc_gap >= limit_pct * 0.97:
                 return ("一字板", "不可捕捉(一字)")
-            if gap >= 1.0:
+            if auc_gap >= 1.0:
                 return ("高开拉升封板", "G组(开盘轨迹缺失,未细分)")
         return ("已封板", "形态未知(轨迹缺失)")
-    first_p = samples[0][1]
+    first_p = auc_gap if auc_gap is not None else samples[0][1]
     head = [p for _, p in samples[:12]]       # 开盘前4分钟
     if first_p >= limit_pct * 0.97:
         return ("一字板", "不可捕捉(一字)")

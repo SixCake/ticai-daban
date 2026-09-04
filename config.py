@@ -54,7 +54,7 @@ _load_dotenv()
 # 须在_load_dotenv()后读取, 保证.env中的CONCEPT_SOURCE可生效
 CONCEPT_SOURCE = os.environ.get("CONCEPT_SOURCE", "kpl").lower()
 
-# kpl题材事件标注回看窗口(交易日): 盘中延续法候选/触及层/动态成分均取
+# kpl题材事件标注回看窗口(交易日): 盘中延续法候选/关联层/动态成分均取
 # 近窗口内被开盘啦标注过的(股票,题材)对; 60日约一个炒作周期
 KPL_THEME_WINDOW = 60
 

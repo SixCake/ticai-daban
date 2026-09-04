@@ -1,0 +1,26 @@
+# 策略配置 — v5_daban
+# V5 两层打板（结构闸选股 + 融合分排序），移植自 research/jq_v5_strategy.py
+# 参数口径见 strategies/_template/SPEC.md
+
+name: v5_daban
+description: V5 两层打板（结构闸 + 融合分排序 + 回落止损 + 未封清仓）
+
+# ---- 账户 ----
+capital: 1000000          # 初始资金（与聚宽回测同口径）
+benchmark: DBBNCH.XSHG    # 自建打板基准（全A等权涨幅累积）
+                          # 跑过 collect/fetch_index_panel.py 后可改 000300.XSHG
+
+# ---- AI feed 订阅 ----
+# 只能读这里声明过的 feed(隔离规范); 未声明的调用会被拒绝并告警
+feeds:
+  - theme_narrative       # 题材叙事强度(apps/ai_feed.py 产出)
+  - market_risk           # 市场风险标注
+
+# ---- 框架 Mod 参数 ----
+mod:
+  mode: replay            # replay=历史回放 | live=盘中实时
+  poll_interval: 20
+  catchup: true
+  fill_sim: 0.30          # 成交概率抽样（研究定稿值）
+  fill_seed: 42
+  order_slip: 0.005       # 高挂限价容差

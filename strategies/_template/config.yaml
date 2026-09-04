@@ -1,0 +1,25 @@
+# 策略配置 — _template
+# 由 apps/sim.py 读取并转成 rqalpha 的 __config__ 传给 rqalpha.run_file()
+# 字段说明见 strategies/_template/SPEC.md
+
+name: _template
+description: 策略模板（复制本目录开始新策略）
+
+# ---- 账户 ----
+capital: 1000000          # 初始资金（每策略独立账户）
+benchmark: DBBNCH.XSHG    # 绩效基准；宽基需先跑 collect/fetch_index_panel.py
+                          # 可选: 000300.XSHG(沪深300) / 000985.XSHG(中证全指)
+                          #       000001.XSHG(上证) / 399006.XSHE(创业板指)
+
+# ---- AI feed 订阅（隔离规范: 只能读这里声明过的）----
+# 共享 feed 直接写名字；私有 feed 写 'private:<名字>'（只属于本策略）
+feeds: []
+
+# ---- 框架 Mod 参数 ----
+mod:
+  mode: replay            # replay=历史回放 | live=盘中实时
+  poll_interval: 20       # live 模式轮询秒数（与雷达 INTERVAL 对齐）
+  catchup: true           # live 模式盘中启动时补跑已过去的快照时刻
+  fill_sim: 0.30          # 成交概率抽样（模拟涨停排队买不进）；1.0=关闭
+  fill_seed: 42           # 抽样种子（保证回测可复现）
+  order_slip: 0.005       # 高挂限价容差（limit_price_of 用）

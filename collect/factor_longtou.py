@@ -47,18 +47,32 @@ def clip01(x):
 
 
 def next_trade_date(d: str) -> str | None:
-    """d(YYYYMMDD)的下一交易日; 日历缺失时退化为跳过周末"""
+    """d(YYYYMMDD)的下一交易日。
+
+    meta.trade_cal 由 poller 以「当日」为 end_date 缓存, horizon 往往只到 d
+    本身(收盘后跑本脚本时日历末日=panel末日) → 查不到下一日时必须退化为
+    跳过周末, 否则尾行被静默丢弃、盘中无当日因子可用(因子滞后一决策日)。
+    退化分支不校节假日: 宁可多挂一行非交易日因子(数值仍是 T-1 口径,
+    无害), 也不能让整日因子缺失。
+    """
+    cal: list = []
     try:
         cal = sorted(load("meta.trade_cal")["cal_date"].tolist())
-        return next((x for x in cal if x > d), None)
     except Exception:
-        from datetime import datetime, timedelta
-        dt0 = datetime.strptime(d, "%Y%m%d")
-        for _ in range(10):
-            dt0 += timedelta(days=1)
-            if dt0.weekday() < 5:
-                return dt0.strftime("%Y%m%d")
-        return None
+        cal = []
+    nxt = next((x for x in cal if x > d), None)
+    if nxt:
+        return nxt
+    from datetime import datetime, timedelta
+    dt0 = datetime.strptime(d, "%Y%m%d")
+    for _ in range(10):
+        dt0 += timedelta(days=1)
+        if dt0.weekday() < 5:
+            fd = dt0.strftime("%Y%m%d")
+            print(f"[warn] 交易日历 horizon 止于 {cal[-1] if cal else '(空)'}, "
+                  f"退化取 {fd} 作 {d} 的下一交易日(未校节假日)")
+            return fd
+    return None
 
 
 CUM_COLS = ["zb_cnt20", "zb_cnt5", "y_volr5", "neg_streak", "neg_deep",
@@ -155,6 +169,9 @@ def compute(panel: pd.DataFrame, ev: pd.DataFrame) -> pd.DataFrame:
     # 尾行: panel末日M的累计值挂到下一交易日T, 使T盘中可用(数据≤M=T-1)
     m_date = panel["trade_date"].max()
     t_next = next_trade_date(m_date)
+    if not t_next:
+        print(f"[warn] 无法定出 {m_date} 的下一交易日, 尾行缺失 → "
+              f"下一交易日盘中无因子可用")
     if t_next:
         tail = last_rows[["ts_code", "industry"] + CUM_COLS].copy()
         tail["trade_date"] = t_next

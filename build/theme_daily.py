@@ -5,12 +5,12 @@
 
 产物: theme.day
   trade_date, concept_code, concept_name,
-  zt_cnt(独占后家数), zt_cnt_raw(归属前触及家数),
+  zt_cnt(独占后家数), zt_cnt_raw(归属前关联家数),
   max_height(最高连板), leader_code, leader_name, leader_height, leader_fd_amount,
   theme_age(该题材连续有涨停的天数)
 
-kpl段(2024-01起): concept_code即题材名(name恒等), 触及家数用当日
-kpl涨停事件theme统计; ths历史段沿用同花顺成分触及口径。
+kpl段(2024-01起): concept_code即题材名(name恒等), 关联家数用当日
+kpl涨停事件theme统计; ths历史段沿用同花顺成分关联口径。
 """
 import sys
 from pathlib import Path
@@ -36,7 +36,7 @@ def main():
         kpl_start = load("limitup.kpl_events",
                          columns=["trade_date"])["trade_date"].min()
 
-    # 归属前每概念触及家数
+    # 归属前每概念关联家数
     mem = load("theme.members")
     concepts = load("theme.concepts")
     theme_codes = set(concepts[concepts["is_theme"]]["ts_code"])
@@ -64,7 +64,7 @@ def main():
     td["concept_name"] = td["concept_code"].map(
         concepts.set_index("ts_code")["name"]).fillna(td["concept_code"])
 
-    # 归属前触及家数: kpl段当日theme直标统计 / ths段成分交集
+    # 归属前关联家数: kpl段当日theme直标统计 / ths段成分交集
     raw_cnt = []
     for d, grp in ev.groupby("trade_date"):
         if kpl_start and d >= kpl_start:

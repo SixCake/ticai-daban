@@ -132,7 +132,7 @@ def _memnames():
 
 
 def _themes_of(code: str, prim, touches: dict, cname: dict) -> list[str]:
-    """独占主概念在前, 其余当日触及概念按触及家数降序, 截断8个"""
+    """独占主概念在前, 其余当日关联概念按关联家数降序, 截断8个"""
     prim = prim if isinstance(prim, str) and pd.notna(prim) else "-"
     tnames = [cname.get(k, k) for k in touches.get(code, [])]
     if prim == "-":

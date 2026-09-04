@@ -43,6 +43,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from config import DATA  # noqa: E402  (live/latest.json 不入目录)
 from core.codes import ts_code_of  # noqa: E402
+from core.times import hhmmss6  # noqa: E402
 from datastore import load, path_of  # noqa: E402
 
 SLEEP = 1.2          # push2his 限流敏感, 低速稳定优先
@@ -116,7 +117,7 @@ def sealed_set(pro, date: str) -> pd.DataFrame:
             "ts_code": sub["ts_code"], "name": sub["name"],
             "height": sub["limit_times"].astype(int),
             "open_times": sub["open_times"].astype(int),
-            "first_time": sub["first_time"].astype(str).str.zfill(6),
+            "first_time": hhmmss6(sub["first_time"]),
             "zb_times": 0,
             "is_yizi": sub["is_yizi"].astype(bool),
             "is_st": sub["is_st"].astype(bool),
@@ -154,7 +155,7 @@ def zb_set(date: str) -> pd.DataFrame:
         "name": zb["名称"].values,
         "height": zb["涨停统计"].str.split("/").str[0].astype(int).values,
         "open_times": 0,
-        "first_time": zb["首次封板时间"].astype(str).str.zfill(6).values,
+        "first_time": hhmmss6(zb["首次封板时间"]).values,
         "zb_times": zb["炸板次数"].astype(int).values,
         "is_yizi": False, "is_st": zb["名称"].str.upper().str.contains("ST").values,
         "float_mv": zb["流通市值"].astype(float).values,  # 元, 与tushare一致

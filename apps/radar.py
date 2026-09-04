@@ -9,6 +9,7 @@
 (每cycle 20s, 涨幅≥3%或概率≥0.2全量含负例)
 """
 import json
+import math
 import sys
 import time
 from collections import defaultdict, deque
@@ -21,7 +22,8 @@ sys.path.insert(0, str(ROOT))
 from config import DATA, QUOTE_SOURCE  # noqa: E402
 from core.attribute import load_con2stock, load_maps  # noqa: E402
 from core.calendar import is_trading_hours  # noqa: E402
-from core.early_signal import build_signals, zt_shape_of  # noqa: E402
+from core.early_signal import (build_signals, prime_alerted,  # noqa: E402
+                               vr_pct, zt_shape_of)
 from core.heat import HOT_THRESHOLD, sw_aggregate, theme_heat  # noqa: E402
 from core.momentum import window_diff  # noqa: E402
 from core.prob import stock_prob  # noqa: E402
@@ -38,6 +40,20 @@ INTERVAL = 20
 TOUCH_EPS = 0.995            # 触板判据
 LOCK_EPS = 0.9995            # 封死判据(价格贴死涨停价)
 LOCK_HOLD = 60               # 封死需连续保持的秒数(否则视为未封死)
+
+
+def _fin(v, nd: int | None = None):
+    """有限数值守卫: None/NaN/inf → None。
+    json.dumps 默认 allow_nan=True 会把 NaN 写进文件, 而浏览器
+    JSON.parse 遇 NaN 直接报错 → 整页数据加载失败。NaN 能通过
+    `x <= 0` 这类守卫(比较恒 False), 必须显式 isfinite 拦。"""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x):
+        return None
+    return round(x, nd) if nd is not None else x
 
 
 class Radar:
@@ -72,6 +88,9 @@ class Radar:
         self._ot_load_date: str = ""
         self._ipx_day: dict = {}      # code -> [[HHMMSS, price, vol, amt], ...] 全天分时
         self._ipx_date: str = ""
+        self._auc: dict = {}          # 竞价快照(09:25~09:30首次达标即冻结)
+        self._auc_date: str = ""
+        self._sweep_src: str = ""     # 本轮实际取数源(qmt|tx), 竞价快照标源用
         self._sw_traj: dict = {}      # l1 -> [[HHMMSS, pct, net, amt], ...] 申万轨迹(回放/hover)
         self._sw_traj_date: str = ""
         self._sw_map: dict = {}       # code -> {l1,l2,...} 申万映射(mtime守护)
@@ -84,18 +103,31 @@ class Radar:
 
     def sweep(self) -> dict:
         t0 = time.time()
+        src = QUOTE_SOURCE
         batches = [self.codes[i:i + 60] for i in range(0, len(self.codes), 60)]
         with ThreadPoolExecutor(8) as ex:
             res = list(ex.map(fetch_quotes, batches))
         quotes = {}
         for r in res:
             quotes.update(r)
-        if not quotes:      # qmt源整体失败(推送断+盘中无横截面) → 腾讯兜底
+        # 陈旧闸: 现价越涨停价 = 行情源昨收口径错配(日bar停在旧交易日),
+        # 单票可能是新股无涨跌幅限制, 但批量错配说明整轮快照不可信
+        # → 整轮丢弃转腾讯兜底(2026-09-03竞价假信号事故的第二道防线)
+        n_bad = sum(1 for q in quotes.values()
+                    if q.get("limit_px", 0) > 0
+                    and q["price"] > q["limit_px"] * 1.001)
+        if quotes and n_bad > 0.01 * len(quotes):
+            print(f"[{datetime.now():%H:%M:%S}] 行情陈旧闸 "
+                  f"{n_bad}/{len(quotes)}只现价越涨停价, 整轮丢弃")
+            quotes = {}
+        if not quotes:      # qmt源整体失败/陈旧(推送断+竞价时段无横截面)
             print("行情源无返回, 兜底腾讯源")
             with ThreadPoolExecutor(8) as ex:
                 res = list(ex.map(fetch_quotes_tx, batches))
             for r in res:
                 quotes.update(r)
+            src = "tx"
+        self._sweep_src = src     # 实际取数源(竞价量比口径只在qmt源成立)
         t = time.time()
         in_ot_win = "0925" <= datetime.fromtimestamp(t).strftime("%H%M") \
             <= "0940"
@@ -109,6 +141,84 @@ class Radar:
                 if not ot or ot[-1][0] < t:
                     ot.append([t, q["pct"]])
         return quotes
+
+    # ---------- 竞价快照 ----------
+    AUC_COVER = 0.9           # 快照覆盖率达标线(占宇宙比例)
+    AUC_VR_COVER = 0.5        # 竞价量比可得率达标线(占快照比例)
+    AUC_GATE_PCT = 0.90       # 竞价质量闸: 竞价量比横截面分位下限
+    AUC_DOMAIN_PCT = 1.0      # 分位排名域=竞价涨幅≥1%(S1候选域)
+
+    def _auc_capture(self, quotes: dict, now, today_s: str) -> dict:
+        """竞价快照 {code: {gap,px,amt,vol,vr,vrp,gate}} →
+        data/live/auction_YYYYMMDD.json。
+
+        竞价量只在 09:25~09:29 可采: 该时段无连续竞价成交, tick 的当日
+        累计量就等于竞价量; 09:30 后混入盘中成交永久不可分离。故窗口内
+        每轮重试, 覆盖率达标即冻结, 末轮(09:29)强制冻结。
+        采不到竞价量的票 vr/vrp/gate 显式置 None, 绝不用盘中量比冒充
+        (否则又是一次"错值看起来像正常值")。
+        竞价时段 quote.pct 即竞价涨幅(价=竞价匹配价), 量比已由
+        quotes 层按 emin=1 算成竞价量比, 与 stk_auction 同口径。"""
+        if self._auc_date != today_s:
+            self._auc_date = today_s
+            self._auc = {}
+            f = LIVE / f"auction_{today_s}.json"
+            if f.exists():
+                try:
+                    self._auc = json.loads(f.read_text(encoding="utf-8"))
+                    print(f"[{now:%H:%M:%S}] 竞价快照回载 "
+                          f"{len(self._auc.get('stocks', {}))}只")
+                except Exception:
+                    self._auc = {}
+        stocks = self._auc.get("stocks") or {}
+        hm = now.strftime("%H%M")
+        # 窗口上限必须与 quotes.qmt._elapsed_min 的 emin=1 区间对齐
+        # (09:25:00~09:29:59): 09:30 后 emin=0 使量比恒为0, 若让 09:30
+        # 那轮做强制冻结会把全市场 vr/vrp/gate 冻成 null
+        if not ("0925" <= hm <= "0929") or self._auc.get("frozen"):
+            return stocks
+        # 量比口径只在 qmt 源成立: _elapsed_min 竞价时段 emin=1 → vr 即
+        # 竞价量比, 与 stk_auction 同式。腾讯兜底的 vr 是接口 f[49] 现成
+        # 量比, 与竞价口径未验证等价 → 一律置 None, 绝不用它冒充
+        # (否则快照看着正常, 实则不可与官方对照, 比缺失更坏)
+        qmt_src = self._sweep_src == "qmt"
+        vrp = vr_pct(quotes, self.AUC_DOMAIN_PCT) if qmt_src else {}
+        snap = {}
+        for c, q in quotes.items():
+            if "ST" in q["name"] or c.endswith(".BJ"):
+                continue
+            gap = _fin(q.get("pct"), 2)
+            if gap is None:      # 脏值不进快照(宁缺不滥)
+                continue
+            vr = (_fin(q.get("vr"), 3) or None) if qmt_src else None
+            p = vrp.get(c) if vr else None
+            snap[c] = {
+                "gap": gap,                     # 竞价时段 pct 即竞价涨幅
+                "px": _fin(q.get("price")),
+                "amt": _fin(q.get("amount")) or 0,
+                "vol": _fin(q.get("volume")) or 0,
+                "vr": vr, "vrp": _fin(p, 3),
+                "gate": (p >= self.AUC_GATE_PCT) if p is not None else None}
+        n_vr = sum(1 for v in snap.values() if v["vr"])
+        freeze = (hm >= "0929"
+                  or (len(snap) >= self.AUC_COVER * len(self.codes)
+                      and n_vr >= self.AUC_VR_COVER * len(snap)))
+        self._auc = {"date": today_s,
+                     "captured_at": now.strftime("%H:%M:%S"),
+                     "src": self._sweep_src or QUOTE_SOURCE, "frozen": freeze,
+                     "n": len(snap), "n_vr": n_vr, "stocks": snap,
+                     "official": self._auc.get("official")}
+        try:
+            (LIVE / f"auction_{today_s}.json").write_text(
+                json.dumps(self._auc, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            print(f"[{now:%H:%M:%S}] 竞价快照落盘失败: {e}")
+        if freeze:
+            print(f"[{now:%H:%M:%S}] 竞价快照冻结 {len(snap)}只 "
+                  f"源{self._sweep_src or QUOTE_SOURCE} "
+                  f"量比可得{n_vr}只 过闸"
+                  f"{sum(1 for v in snap.values() if v['gate'])}只")
+        return snap
 
     def once(self) -> float:
         """执行一轮扫描并写出radar.json, 返回耗时(秒)"""
@@ -273,8 +383,9 @@ class Radar:
             n_gate = sum(1 for v in self._struct.values() if v["gate"])
             print(f"V5结构层快照 {len(self._struct)}只, 结构闸通过"
                   f" {n_gate}只, ldlr_prev={ldlr}")
+        auc = self._auc_capture(quotes, now, today_s)
         presig = build_signals(self.hist, quotes, t, today_s,
-                               self._yest_cpos)
+                               self._yest_cpos, auc)
         # 当日累积(每票每级只留首次, 跨cycle不丢)
         if self._presig_date != today_s:
             self._presig_day = {}
@@ -295,6 +406,9 @@ class Radar:
                         self._presig_day[key] = d
                     print(f"[{now:%H:%M:%S}] 预警信号回载 "
                           f"{len(self._presig_day)}条")
+                    # 封口已报集合: 否则重启后 build_signals 重报同名信号,
+                    # radar 无条件覆盖 _presig_day → 原触发时刻/买价全丢
+                    prime_alerted(today_s, list(self._presig_day))
                 except Exception as e:
                     print(f"[{now:%H:%M:%S}] 预警信号回载失败: {e}")
         if self._ipx_date != today_s:      # 全天分时回载(真实价+累计量额)
@@ -330,6 +444,15 @@ class Radar:
                         "v5": v5_full(st["v5_base"], s.get("r3"),
                                       s.get("pathvol")),
                         "zb20": st["zb_cnt20"], "ir": st["ind_rank"]}
+                # 竞价影子字段: 只展示不拦截触发(S1门槛仍≥1%不变);
+                # gate 供看板展示层过滤 S1 观察名单, 未验证前不进触发路径
+                au = auc.get(s["ts_code"])
+                if au:
+                    s["auc"] = {"gap": au["gap"], "vr": au["vr"],
+                                "vrp": au["vrp"], "gate": au["gate"]}
+                    # 来源标记: 盘中快照。与 T+1 官方回填区分, 研究侧可按
+                    # auc_src!='live' 排除(Forward Return 方法论要求)
+                    s["auc_src"] = "live"
             self._presig_day[key] = s
         # 已封板信号票: 补涨停形态与模型归属(封板后不变, 只算一次;
         # “未知/未细分”类允许在轨迹回载后重算升级)
@@ -339,9 +462,12 @@ class Radar:
                 continue
             q = quotes.get(s["ts_code"])
             if q:
+                # 高开/一字判定优先用竞价涨幅(出处确定), 避免轨迹首点
+                # 不是竞价样本时把非一字板误判成一字板
                 r = zt_shape_of(s["ts_code"], self.hist.get(s["ts_code"]),
                                 q, q.get("open", 0.0),
-                                self._open_traj.get(s["ts_code"]))
+                                self._open_traj.get(s["ts_code"]),
+                                (s.get("auc") or {}).get("gap"))
                 if r:
                     s["zt_shape"], s["mode"] = r
         # 价格时间线: S2/S3全记 + S1封板后记; 顺带更新封板时刻

@@ -12,10 +12,19 @@ GET /api/dates          → 最近60个交易日列表
 GET /api/intraday?code=&date=  → 全天分时合并数据 {code,pts,pb,pt,why}
 GET /api/dailyk?code=&n=  → 日K线(不复权) {code,bars,src} 供个股详情弹窗
 GET /api/intradaypx_batch?codes=a,b&date=  → 多票原始分时(跷跷板图表)
+GET /api/simlist        → 策略启用清单(strategies/strategies.yaml)
+GET /api/runs?kind=&strategy= → run 清单(kind=live 策略模拟 / backtest 策略回测)
+GET /api/run?id=&asof=  → run 详情(指标/曲线/交易/持仓/日志; live 含盘中实时点)
+POST /api/backtest/run  → 发起回测 {strategy,start,end,freq,capital}
+POST /api/sim/start     → 发起模拟 {strategy,seed_run?,capital?} seed_run=以某次回测为起点
+POST /api/sim/stop      → 关闭/取消 run {id}
 
 启动: python apps/server.py [port]  默认8765
 """
 import json
+import os
+import signal
+import subprocess
 import sys
 from collections import defaultdict
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -709,15 +718,518 @@ def _sw_day(date: str) -> dict:
     return out
 
 
+# ---------- 策略模拟 / 策略回测(run 目录模型) ----------
+# 回测与模拟同构: 一次运行一个 data/sim/runs/{run_id}/ 目录(meta.json +
+# equity/trades/positions/state/run.log), 见 apps/sim.py 头部注释。
+
+SIM_ROOT = DATA / "sim"
+RUNS_DIR = SIM_ROOT / "runs"
+STRAT_DIR = ROOT / "strategies"
+_simlist_cache: dict = {}
+
+
+def _sim_registry() -> list:
+    """strategies/strategies.yaml 的启用清单(mtime 守护缓存)"""
+    f = STRAT_DIR / "strategies.yaml"
+    if not f.exists():
+        return []
+    mt = f.stat().st_mtime
+    if _simlist_cache.get("mt") == mt:
+        return _simlist_cache["items"]
+    try:
+        import yaml
+        d = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        items = d.get("strategies") or []
+    except Exception:
+        items = []
+    _simlist_cache.update({"mt": mt, "items": items})
+    return items
+
+
+def _pid_alive(pid) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except Exception:
+        return False
+    return True
+
+
+def _run_meta(rid: str) -> dict:
+    f = RUNS_DIR / rid / "meta.json"
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _run_status(meta: dict) -> str:
+    """展示态状态。live 模拟是跨日的: 子进程收盘退出 ≠ 模拟关闭(次日
+    继续), 故 live 只看显式 closed/failed; backtest 子进程异常消失且无
+    收尾写 → failed。"""
+    st = meta.get("status")
+    if meta.get("kind") == "live":
+        return st if st in ("closed", "failed") else "running"
+    if st == "running" and not _pid_alive(meta.get("pid")):
+        return "failed"
+    return st
+
+
+def _latest_state(rd: Path) -> dict:
+    sd = Path(rd) / "state"
+    if not sd.exists():
+        return {}
+    fs = sorted(sd.glob("*.json"))
+    if not fs:
+        return {}
+    try:
+        return json.loads(fs[-1].read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _run_quick(meta: dict) -> dict:
+    """列表页摘要指标(含 live 盘中实时点); 不足样本一律 None 不伪造"""
+    out = {"days": 0, "total_return": None, "annualized": None,
+           "max_drawdown": None, "equity_now": None, "today_return": None,
+           "benchmark_return": None}
+    eqf = RUNS_DIR / meta["id"] / "equity.parquet"
+    if not eqf.exists():
+        return out
+    try:
+        eq = pd.read_parquet(eqf).sort_values("trade_date")
+    except Exception:
+        return out
+    if not len(eq):
+        return out
+    nav = eq["equity"].astype(float)
+    intraday = None
+    if meta.get("kind") == "live":
+        st = _latest_state(RUNS_DIR / meta["id"])
+        if st and str(st.get("date")) > str(eq["trade_date"].astype(str).iloc[-1]):
+            intraday = st
+    last_eq = float(intraday["equity"]) if intraday else float(nav.iloc[-1])
+    first_eq = float(nav.iloc[0])
+    out["days"] = int(len(eq)) + (1 if intraday else 0)
+    out["equity_now"] = round(last_eq, 2)
+    out["total_return"] = round(last_eq / first_eq - 1, 6) if first_eq else None
+    if out["days"] >= 2 and first_eq > 0 and last_eq > 0:
+        out["annualized"] = round((last_eq / first_eq) ** (242 / out["days"]) - 1, 6)
+    series = [float(v) for v in nav.values] + ([last_eq] if intraday else [])
+    peak, mdd = series[0], 0.0
+    for v in series:
+        peak = max(peak, v)
+        if peak > 0:
+            mdd = min(mdd, v / peak - 1)
+    out["max_drawdown"] = round(mdd, 6)
+    if intraday and float(nav.iloc[-1]) > 0:
+        out["today_return"] = round(last_eq / float(nav.iloc[-1]) - 1, 6)
+    bm = eq["benchmark"].astype(float).dropna()
+    if len(bm) >= 1 and float(bm.iloc[0]) > 0:
+        b_last = (intraday.get("benchmark") if intraday
+                  and intraday.get("benchmark") else None)
+        b_last = float(b_last) if b_last else float(bm.iloc[-1])
+        out["benchmark_return"] = round(b_last / float(bm.iloc[0]) - 1, 6)
+    return out
+
+
+def _runs_list(kind: str | None = None, strategy: str | None = None) -> list:
+    from apps import sim as simmod
+    try:
+        simmod.migrate_legacy()   # 幂等兑底: legacy 环境首次打开看板即迁移
+    except Exception:
+        pass
+    out = []
+    if not RUNS_DIR.exists():
+        return out
+    for rd in sorted(RUNS_DIR.iterdir()):
+        if not rd.is_dir():
+            continue
+        meta = _run_meta(rd.name)
+        if not meta:
+            continue
+        if kind and meta.get("kind") != kind:
+            continue
+        if strategy and meta.get("strategy") != strategy:
+            continue
+        out.append({**meta, "status": _run_status(meta),
+                    "alive": _pid_alive(meta.get("pid")),
+                    **_run_quick(meta)})
+    out.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return out
+
+
+def _to_records(df) -> list:
+    """DataFrame → list[dict], 规整两类坑(均为 sys_analyser 输出实测):
+    ① index 名字与某列同名(trades 的 index 叫 datetime, 又有一列 datetime)
+       → reset_index 报 "cannot insert datetime, already exists"
+    ② 两列同名(trades 有 datetime,datetime 两列) → itertuples 会把重名
+       列变成 _1/_2, getattr 取不到
+    规整: 先改 index 名避免撞列, reset 后给重名列加后缀。"""
+    if df is None or not len(df):
+        return []
+    df = df.copy()
+    if df.index.name and df.index.name in df.columns:
+        df.index.name = "_idx_" + str(df.index.name)
+    df = df.reset_index()
+    seen, newcols = {}, []
+    for c in df.columns:
+        if c in seen:
+            seen[c] += 1
+            newcols.append(f"{c}__{seen[c]}")
+        else:
+            seen[c] = 0
+            newcols.append(c)
+    df.columns = newcols
+    return [r._asdict() for r in df.itertuples()]
+
+
+def _cross_metrics(eq: "pd.DataFrame", risk_free: float = 0.015) -> dict:
+    """跨日(模拟开始→当日)全套绩效指标, 用 rqrisk 对日收益序列算。
+
+    为何不用 pkl 的 summary: pkl 是单次 run 的结果, live 模式每天跑单日
+    会覆盖它; 用户要的是"从模拟时间到当日"的整体指标, 故对跨日净值序列
+    重算。基准取 equity parquet 的 benchmark 列(自建打板基准或指数)。
+    不足 2 个交易日的指标返回 None(不伪造)。"""
+    import math
+    import numpy as np
+    out = {}
+    if eq is None or len(eq) < 2:
+        return out
+    eq = eq.sort_values("trade_date").reset_index(drop=True)
+    nav = eq["equity"].astype(float).values
+    strat_ret = np.diff(nav) / nav[:-1]
+    bm = eq["benchmark"].astype(float)
+    if bm.notna().sum() >= 2:
+        bmv = bm.fillna(method="ffill").values if hasattr(bm, "fillna") \
+            else bm.ffill().values
+        bench_ret = np.diff(bmv) / np.where(bmv[:-1] == 0, 1, bmv[:-1])
+    else:
+        bench_ret = np.zeros_like(strat_ret)
+    try:
+        from rqrisk.risk import Risk, DAILY
+        k = Risk(strat_ret, bench_ret, risk_free, period=DAILY,
+                 trading_days_a_year=244)
+        def _g(fn):
+            try:
+                v = getattr(k, fn)
+                v = v() if callable(v) else v   # rqrisk 指标多为属性而非方法
+                v = float(v)
+                return None if math.isnan(v) else v
+            except Exception:
+                return None
+        out.update({
+            "total_returns": _g("return_rate"),
+            "annualized_returns": _g("annual_return"),
+            "excess_returns": _g("excess_return_rate"),
+            "excess_annual_returns": _g("excess_annual_return"),
+            "alpha": _g("alpha"), "beta": _g("beta"),
+            "sharpe": _g("sharpe"), "sortino": _g("sortino"),
+            "information_ratio": _g("information_ratio"),
+            "max_drawdown": _g("max_drawdown"),
+            "excess_max_drawdown": _g("excess_max_drawdown"),
+            "excess_sharpe": _g("excess_sharpe"),
+            "volatility": _g("annual_volatility"),
+            "excess_volatility": _g("excess_annual_volatility"),
+            "benchmark_volatility": _g("benchmark_annual_volatility"),
+            "downside_risk": _g("annual_downside_risk"),
+            "tracking_error": _g("annual_tracking_error"),
+            "win_rate": _g("win_rate"),
+            "var": _g("var"), "calmar": _g("calmar"),
+        })
+    except Exception:
+        out = {}
+    # 最大回撤区间(自算: 净值峰值→谷值)
+    peak = np.maximum.accumulate(nav)
+    dd = nav / peak - 1.0
+    if len(dd) and dd.min() < 0:
+        i_end = int(np.argmin(dd))
+        i_start = int(np.argmax(nav[:i_end + 1])) if i_end > 0 else 0
+        out["max_drawdown_duration_start_date"] = str(eq["trade_date"][i_start])
+        out["max_drawdown_duration_end_date"] = str(eq["trade_date"][i_end])
+    out["days"] = int(len(eq))
+    out["start_date"] = str(eq["trade_date"].iloc[0])
+    out["end_date"] = str(eq["trade_date"].iloc[-1])
+    return out
+
+
+def _log_progress(log_lines) -> str | None:
+    """日志里最新模拟日期([YYYY-MM-DD ...] 前缀) = 回测/补跑进度"""
+    import re as _re
+    last = None
+    for ln in log_lines:
+        m = _re.match(r"\[(\d{4}-\d{2}-\d{2}) ", ln)
+        if m:
+            last = m.group(1).replace("-", "")
+    return last
+
+
+def _live_state_block(st: dict) -> dict:
+    """详情 payload 的实时快照块(资金/持仓/当日盈亏)"""
+    if not st:
+        return {}
+    return ({k: st.get(k) for k in
+             ("date", "ts", "equity", "cash", "frozen_cash",
+              "market_value", "start_cash", "day_pnl",
+              "total_pnl", "total_pnl_pct")}
+            | {"positions": st.get("positions") or []})
+
+
+def _run_payload(rid: str, asof: str | None = None) -> dict:
+    """run 详情数据(回测与模拟同构, 对齐聚宽回测详情的信息结构)。
+
+    asof: 截至某日(YYYYMMDD)。缺省=最新。给定则把 equity/trades/
+    positions 截断到 <= asof 并重算指标 —— 供模拟详情日期导航
+    (默认最新/前后交易日跳转/一键最新) 展示"截至某日"的整体表现。
+
+    live 实时: 最新 state 的日期新于 equity 末日时, 把盘中快照拼成
+    当日净值点并入序列 → 指标/曲线盘中实时产出(与回测同一套口径)。
+
+    跨日口径(模拟开始 → 当日):
+      指标/收益曲线   ← run_dir/equity.parquet + rqrisk 重算
+      交易/回合盈亏   ← run_dir/trades.parquet (sim.py 逐日累积)
+      每日持仓        ← run_dir/positions.parquet (逐日累积)
+    实时/单次口径:
+      当前持仓/资金   ← run_dir/state/ 最新快照(live)
+      被抽掉的订单    ← 最新 state 的 fill_sim_skipped
+      日志            ← run_dir/run.log 末尾
+    """
+    import math
+    rd = RUNS_DIR / rid
+    meta = _run_meta(rid)
+    if not meta:
+        return {"error": f"run {rid} 不存在"}
+    eqf = rd / "equity.parquet"
+    if not eqf.exists():
+        # 尚无 equity(回测运行中/首日模拟未结算): 仍返回骨架 payload ——
+        # 日志流+进度日实时跟进, 不能只给一句 error 让页面干等
+        st0 = _latest_state(rd) if meta.get("kind") == "live" else {}
+        lf0 = rd / "run.log"
+        log0 = (lf0.read_text(encoding="utf-8", errors="replace")
+                .splitlines()[-400:] if lf0.exists() else [])
+        return {
+            "run_id": rid,
+            "meta": {**meta, "status": _run_status(meta),
+                     "alive": _pid_alive(meta.get("pid")),
+                     "progress_date": _log_progress(log0)},
+            "intraday_ts": st0.get("ts") if st0 else None,
+            "live_state": _live_state_block(st0),
+            "metrics": {}, "portfolio": [], "benchmark": [], "trades": [],
+            "round_trips": [], "n_win": 0, "n_loss": 0, "positions": [],
+            "skipped": (st0.get("fill_sim_skipped") or []) if st0 else [],
+            "log": log0,
+        }
+    try:
+        eq = pd.read_parquet(eqf)
+    except Exception as e:
+        return {"error": f"读取 equity 失败: {e}"}
+    # ---- live 盘中实时点 ----
+    st = _latest_state(rd) if meta.get("kind") == "live" else {}
+    intraday_ts = None
+    if st and str(st.get("date")) > str(eq["trade_date"].astype(str).max()):
+        intraday_ts = st.get("ts")
+        eq = pd.concat([eq, pd.DataFrame([{
+            "trade_date": st["date"], "equity": st["equity"],
+            "cash": st.get("cash"), "position_value": st.get("market_value"),
+            "benchmark": st.get("benchmark"),
+        }])], ignore_index=True)
+    if asof:
+        eq = eq[eq["trade_date"].astype(str) <= str(asof)]
+        if eq.empty:
+            return {"error": f"asof={asof} 之前无记录"}
+
+    def _f(v):
+        if v is None:
+            return None
+        try:
+            v = float(v)
+        except Exception:
+            return None
+        return None if math.isnan(v) else round(v, 6)
+
+    metrics = _cross_metrics(eq)
+
+    # ---- 收益曲线(策略/基准 归一净值) ----
+    eq = eq.sort_values("trade_date").reset_index(drop=True)
+    base_eq = float(eq["equity"].iloc[0]) or 1.0
+    portfolio, benchmark = [], []
+    bm_base = None
+    for r in eq.itertuples():
+        d = str(r.trade_date)
+        portfolio.append({
+            "date": d,
+            "unit_net_value": _f(float(r.equity) / base_eq),
+            "total_value": _f(r.equity),
+            "cash": _f(getattr(r, "cash", None)),
+            "market_value": _f(getattr(r, "position_value", None)),
+        })
+        b = getattr(r, "benchmark", None)
+        if b is not None and b == b:
+            if bm_base is None:
+                bm_base = float(b)
+            benchmark.append({"date": d,
+                              "unit_net_value": round(float(b) / bm_base, 6)
+                              if bm_base else None})
+        else:
+            benchmark.append({"date": d, "unit_net_value": None})
+    metrics["starting_cash"] = base_eq
+    metrics["run_type"] = "PAPER(累积)"
+
+    # ---- 交易明细(跨日累积, 按 asof 截断) ----
+    trades = []
+    tf = rd / "trades.parquet"
+    if tf.exists():
+        try:
+            tr = pd.read_parquet(tf).sort_values("datetime")
+            if asof:
+                tr = tr[tr["datetime"].astype(str).str[:10].str.replace(
+                    "-", "") <= str(asof)]
+            for rec in _to_records(tr):
+                qty = float(rec.get("last_quantity") or 0)
+                px = float(rec.get("last_price") or 0)
+                trades.append({
+                    "datetime": str(rec.get("datetime") or ""),
+                    "code": rec.get("order_book_id", ""),
+                    "symbol": rec.get("symbol", ""),
+                    "side": str(rec.get("side", "")),
+                    "effect": str(rec.get("position_effect", "")),
+                    "price": round(px, 3), "quantity": int(qty),
+                    "amount": round(px * qty, 2),
+                    "commission": _f(rec.get("commission")),
+                    "tax": _f(rec.get("tax")),
+                })
+        except Exception:
+            trades = []
+
+    # ---- 回合盈亏(FIFO 买→卖) ----
+    round_trips, lots = [], {}
+    for t in trades:
+        code = t["code"]
+        if t["side"] == "BUY":
+            lots.setdefault(code, []).append([t["price"], t["quantity"]])
+        elif t["side"] == "SELL":
+            remain, cost, q = t["quantity"], 0.0, lots.get(code, [])
+            while remain > 0 and q:
+                bp, bq = q[0]
+                take = min(remain, bq)
+                cost += bp * take
+                q[0][1] -= take
+                remain -= take
+                if q[0][1] <= 0:
+                    q.pop(0)
+            sold = t["quantity"] - remain
+            if sold > 0:
+                avg_cost = cost / sold
+                round_trips.append({
+                    "code": code, "symbol": t["symbol"],
+                    "sell_datetime": t["datetime"],
+                    "avg_cost": round(avg_cost, 3),
+                    "sell_price": t["price"], "quantity": sold,
+                    "pnl": round((t["price"] - avg_cost) * sold, 2),
+                    "pnl_pct": round((t["price"] / avg_cost - 1) * 100, 3)
+                    if avg_cost else None,
+                })
+    n_win = sum(1 for r in round_trips if r["pnl"] > 0)
+    n_loss = len(round_trips) - n_win
+    metrics["trade_win_rate"] = round(n_win / len(round_trips), 4) \
+        if round_trips else None
+
+    # ---- 每日持仓(跨日累积, 按 asof 截断) ----
+    positions = []
+    pf_ = rd / "positions.parquet"
+    if pf_.exists():
+        try:
+            sp = pd.read_parquet(pf_).sort_values(["date", "order_book_id"])
+            if asof:
+                sp = sp[sp["date"].astype(str).str[:10].str.replace(
+                    "-", "") <= str(asof)]
+            for rec in _to_records(sp):
+                positions.append({
+                    "date": str(rec.get("date") or ""),
+                    "code": rec.get("order_book_id", ""),
+                    "symbol": rec.get("symbol", ""),
+                    "quantity": int(float(rec.get("quantity") or 0)),
+                    "avg_price": _f(rec.get("avg_price")),
+                    "last_price": _f(rec.get("last_price")),
+                    "market_value": _f(rec.get("market_value")),
+                })
+        except Exception:
+            positions = []
+
+    # ---- 被成交概率闸门抽掉的订单(最新 state) ----
+    skipped = st.get("fill_sim_skipped") or [] if st else []
+
+    # ---- 日志(run 目录) ----
+    log_lines = []
+    lf = rd / "run.log"
+    if lf.exists():
+        try:
+            log_lines = lf.read_text(
+                encoding="utf-8", errors="replace").splitlines()[-400:]
+        except Exception:
+            log_lines = []
+
+    return {
+        "run_id": rid,
+        "meta": {**meta, "status": _run_status(meta),
+                 "alive": _pid_alive(meta.get("pid")),
+                 "progress_date": _log_progress(log_lines)},
+        "intraday_ts": intraday_ts,
+        "live_state": _live_state_block(st),
+        "metrics": metrics,
+        "portfolio": portfolio,
+        "benchmark": benchmark,
+        "trades": trades,
+        "round_trips": round_trips,
+        "n_win": n_win,
+        "n_loss": n_loss,
+        "positions": positions,
+        "skipped": skipped,
+        "log": log_lines,
+    }
+
+
+def _spawn_sim_cmd(extra: list) -> list:
+    return [sys.executable, "-u", str(ROOT / "apps" / "sim.py")] + extra
+
+
+def _spawn_run(run_id: str, extra: list) -> dict:
+    """建 run 目录 + meta(running) 并拉起子进程, 日志进 run_dir/run.log"""
+    from datetime import datetime as _dt
+    rd = RUNS_DIR / run_id
+    rd.mkdir(parents=True, exist_ok=True)
+    cmd = _spawn_sim_cmd(extra + ["--run-id", run_id])
+    fh = open(rd / "run.log", "a", encoding="utf-8")
+    p = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                         cwd=str(ROOT))
+    from apps.sim import write_meta
+    write_meta(rd, pid=p.pid, status="running",
+               created_at=(_run_meta(run_id).get("created_at")
+                           or _dt.now().strftime("%Y-%m-%d %H:%M:%S")))
+    return {"run_id": run_id, "pid": p.pid}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(WEB), **kw)
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html"):
-            self.path = "/dashboard.html"
-            return super().do_GET()
+        if parsed.path in ("/", "/index.html", "/dashboard.html"):
+            # 看板页强制 no-store: 启发式缓存会让旧 JS 驻留浏览器
+            # (实测旧缓存页没有 btRun 等新函数, 点「运行回测」静默无反应)
+            body = (WEB / "dashboard.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/api/live":
             f = DATA / "live" / "latest.json"
             return self._send_json(f.read_text(encoding="utf-8")
@@ -860,6 +1372,33 @@ class Handler(SimpleHTTPRequestHandler):
                     return self._send_json(
                             json.dumps({"error": str(e)}, ensure_ascii=False), 500)
             return self._send_json(f.read_text(encoding="utf-8"))
+        if parsed.path == "/api/simlist":
+            return self._send_json(json.dumps(
+                {"strategies": _sim_registry()}, ensure_ascii=False))
+        if parsed.path == "/api/runs":
+            q = parse_qs(parsed.query)
+            kind = q.get("kind", [None])[0]
+            strat = q.get("strategy", [None])[0]
+            try:
+                return self._send_json(json.dumps(
+                    {"runs": _runs_list(kind, strat)},
+                    ensure_ascii=False, default=str))
+            except Exception as e:
+                return self._send_json(
+                    json.dumps({"error": str(e)}, ensure_ascii=False), 500)
+        if parsed.path == "/api/run":
+            q = parse_qs(parsed.query)
+            rid = q.get("id", [None])[0]
+            asof = q.get("asof", [None])[0]
+            if not rid:
+                return self._send_json('{"error":"id required"}', 400)
+            try:
+                return self._send_json(json.dumps(
+                    _run_payload(rid, asof=asof),
+                    ensure_ascii=False, default=str))
+            except Exception as e:
+                return self._send_json(
+                    json.dumps({"error": str(e)}, ensure_ascii=False), 500)
         if parsed.path == "/api/dates":
             ev = load("limitup.events_enriched", columns=["trade_date"])
             dates = sorted(ev["trade_date"].unique())[-60:][::-1]
@@ -868,6 +1407,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path in ("/api/backtest/run", "/api/sim/start",
+                           "/api/sim/stop"):
+            return self._post_sim(parsed.path)
         if parsed.path == "/api/focus":
             from datetime import datetime as _dt
             try:
@@ -891,6 +1433,91 @@ class Handler(SimpleHTTPRequestHandler):
                     json.dumps({"error": str(e)}, ensure_ascii=False), 500)
         self.send_response(404)
         self.end_headers()
+
+    def _post_sim(self, path: str):
+        """回测运行 / 模拟启停(异步子进程, 看板轮询状态)"""
+        from datetime import datetime as _dt
+        from apps.sim import write_meta
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(n).decode("utf-8")
+                              if n else "{}")
+        except Exception as e:
+            return self._send_json(
+                json.dumps({"error": f"body 解析失败: {e}"},
+                           ensure_ascii=False), 400)
+        strat = str(body.get("strategy") or "")
+        now = _dt.now()
+        try:
+            if path == "/api/backtest/run":
+                if not (STRAT_DIR / strat / "strategy.py").exists():
+                    return self._send_json(
+                        json.dumps({"error": f"策略 {strat} 不存在"},
+                                   ensure_ascii=False), 400)
+                start = str(body.get("start") or "").replace("-", "")
+                end = str(body.get("end") or "").replace("-", "")
+                freq = "1d" if body.get("freq") == "1d" else "1m"
+                if len(start) != 8 or len(end) != 8:
+                    return self._send_json(
+                        '{"error":"start/end 需 YYYYMMDD"}', 400)
+                run_id = f"{strat}__bt_{now.strftime('%Y%m%d_%H%M%S')}"
+                rd = RUNS_DIR / run_id
+                write_meta(rd, id=run_id, kind="backtest", strategy=strat,
+                           mode="replay", start=start, end=end, freq=freq,
+                           capital=int(body.get("capital") or 0) or None,
+                           seed_run=None,
+                           created_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+                           status="running")
+                extra = ["--run-one", strat, "--mode", "replay",
+                         "--start", start, "--end", end, "--freq", freq]
+                if body.get("capital"):
+                    extra += ["--capital", str(int(body["capital"]))]
+                return self._send_json(json.dumps(
+                    _spawn_run(run_id, extra), ensure_ascii=False))
+            if path == "/api/sim/start":
+                if not (STRAT_DIR / strat / "strategy.py").exists():
+                    return self._send_json(
+                        json.dumps({"error": f"策略 {strat} 不存在"},
+                                   ensure_ascii=False), 400)
+                seed = body.get("seed_run") or None
+                if seed and not (RUNS_DIR / seed / "meta.json").exists():
+                    return self._send_json(
+                        json.dumps({"error": f"起点回测 {seed} 不存在"},
+                                   ensure_ascii=False), 400)
+                today = now.strftime("%Y%m%d")
+                run_id = f"{strat}__sim_{now.strftime('%Y%m%d_%H%M%S')}"
+                rd = RUNS_DIR / run_id
+                write_meta(rd, id=run_id, kind="live", strategy=strat,
+                           mode="live", start=today, end=today, freq="1m",
+                           capital=int(body.get("capital") or 0) or None,
+                           seed_run=seed,
+                           created_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+                           status="running")
+                extra = ["--run-one", strat, "--mode", "live",
+                         "--start", today, "--end", today, "--freq", "1m"]
+                if seed:
+                    extra += ["--seed-run", seed]
+                if body.get("capital"):
+                    extra += ["--capital", str(int(body["capital"]))]
+                return self._send_json(json.dumps(
+                    _spawn_run(run_id, extra), ensure_ascii=False))
+            # /api/sim/stop
+            rid = str(body.get("id") or "")
+            meta = _run_meta(rid)
+            if not meta:
+                return self._send_json(
+                    json.dumps({"error": f"run {rid} 不存在"},
+                               ensure_ascii=False), 404)
+            if _pid_alive(meta.get("pid")):
+                os.kill(int(meta["pid"]), signal.SIGTERM)
+            final = "closed" if meta.get("kind") == "live" else "cancelled"
+            write_meta(RUNS_DIR / rid, status=final,
+                       closed_at=now.strftime("%Y-%m-%d %H:%M:%S"))
+            return self._send_json(json.dumps(
+                {"ok": True, "id": rid, "status": final}))
+        except Exception as e:
+            return self._send_json(
+                json.dumps({"error": str(e)}, ensure_ascii=False), 500)
 
     def _send_json(self, text: str, code: int = 200):
         body = text.encode("utf-8")
