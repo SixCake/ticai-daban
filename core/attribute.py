@@ -296,14 +296,22 @@ def touch_map_kpl(date: str, codes: list[str]):
                 touches[c] = sorted(pairs.get(c, ()))
         return dict(raw_cnt), touches
     pairs = _kpl_pairs()
-    wcnt: dict = defaultdict(int)
+    heat: dict = defaultdict(int)          # 题材近窗口热度(供 touches 排序)
     for ts in pairs.values():
         for t in ts:
-            wcnt[t] += 1
+            heat[t] += 1
+    # raw_cnt = 今日涨停股的全tag关联家数(与直标日同口径)。旧实现误用
+    # 「近窗口全部标注热度」当 raw_cnt → kpl缺失日(T+1未入库)家数虚高
+    # (实测0907机器人概念253, 而当日涨停仅93家), 污染 theme.day.zt_cnt_raw
+    # 与下游关联家数展示/波次在场判定。热度仅用于给个股题材排序。
+    rcnt: dict = defaultdict(int)
+    for c in codes:
+        for t in pairs.get(c, ()):
+            rcnt[t] += 1
     touches = {c: sorted(pairs.get(c, ()),
-                          key=lambda k: (-wcnt.get(k, 0), k))
+                          key=lambda k: (-heat.get(k, 0), k))
                for c in codes}
-    return dict(wcnt), touches
+    return dict(rcnt), touches
 
 
 # ---- 统一入口(盘中poller/复盘review共用, 屏蔽数据源差异) ----

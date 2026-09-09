@@ -150,6 +150,12 @@ def build_rqalpha_config(name: str, cfg: dict, mode: str,
     # 信息比率/超额收益(否则全为 nan)。数据源会对面板未覆盖的尾部交易日
     # 做前向填充, 故盘中实时模式(面板未补尾)也不会因基准缺最后一天而崩。
     benchmark = cfg.get("benchmark") or "DBBNCH.XSHG"
+    # rqalpha 的 parse_init_positions(utils/config.py) 只接受字符串
+    # "code:qty,code:qty"; 传 dict/list 会被 isinstance(…, str) 闸静默
+    # 转成空列表 → 继承持仓全部丢失(实测踩坑: 跨日继承/以回测为起点
+    # 都不生效)。故必须拼成字符串。
+    init_pos_str = ",".join(f"{c}:{int(q)}"
+                            for c, q in (init_positions or {}).items())
     return {
         "base": {
             "start_date": _fmt_date(start),
@@ -160,7 +166,7 @@ def build_rqalpha_config(name: str, cfg: dict, mode: str,
             "run_type": "b",
             "strategy_file": str(strategy_file(name)),
             "matching_type": "current_bar",
-            "init_positions": dict(init_positions or {}),
+            "init_positions": init_pos_str,
             # 显式声明税率(保持 0 = 现状), 消掉 rqalpha 每次启动的
             # capital_gain_tax_rate 未配置 WARN
             "capital_gain_tax_rate": 0.0,
@@ -246,8 +252,13 @@ def _accumulate_run(run_dir: Path) -> None:
         old = pd.read_parquet(out) if out.exists() else None
         have = set()
         if old is not None and len(old):
-            have = {tuple(str(r[c]) for c in idcols)
-                    for r in old.itertuples() if all(hasattr(r, c) for c in idcols)}
+            # itertuples() 产出 namedtuple, 只能用 getattr 取列(属性名),
+            # 不能用 r[c] 字符串下标 → 否则抛
+            # "tuple indices must be integers or slices, not str"
+            # (实测踩坑: 导致 live 跨日 trades/positions 累积整段失败)
+            have = {tuple(str(getattr(r, c, "")) for c in idcols)
+                    for r in old.itertuples()
+                    if all(hasattr(r, c) for c in idcols)}
         add = [r for r in df.itertuples()
                if tuple(str(getattr(r, c, "")) for c in idcols) not in have]
         if not add:
@@ -263,18 +274,32 @@ def _accumulate_run(run_dir: Path) -> None:
 def _write_backtest_records(run_dir: Path) -> None:
     """回测(单次 run 即完整记录): 从 pkl 一次性写出 equity/trades/positions。
 
-    equity 取 pkl['portfolio'](逐日 total_value/cash/market_value);
-    基准列存 benchmark_unit_net_value(归一净值) —— 看板展示时本来就要
-    再归一, 尺度不影响曲线与 IR/alpha/beta。"""
+    equity 取 pkl['portfolio'](逐日 total_value/cash/market_value)。
+    基准列必须存【原始基准值】(数据源 benchmark_close, 与 state.py 盘中
+    追加口径一致), 不能用 pkl 的归一化 benchmark_unit_net_value ——
+    否则与盘中 state 的原始 benchmark(~2400)混拼, server 算基准收益/
+    alpha/IR 时归一值(~1.0)除原始值(~2400)会得到天文数字(实测踩坑:
+    基准收益 +239866%、alpha -7e+97)。"""
     import numpy as np
     import pandas as pd
     import pickle
     d = pickle.load(open(Path(run_dir) / "analyser.pkl", "rb"))
     pf = d.get("portfolio")
     if pf is not None and len(pf):
-        bm = (pf["benchmark_unit_net_value"].astype(float).values
-              if "benchmark_unit_net_value" in pf.columns
-              else np.full(len(pf), np.nan))
+        # 原始基准值: 逐日取数据源 benchmark_close(与 state.py 同口径)
+        bm_id = read_meta(run_dir).get("benchmark") or "DBBNCH.XSHG"
+        bm = np.full(len(pf), np.nan)
+        try:
+            from rqalpha_mod_ticai.data_source import TicaiDataSource
+            ds = TicaiDataSource()
+            for i, dt in enumerate(pf.index):
+                v = ds.benchmark_close(bm_id, dt)
+                if v is not None:
+                    bm[i] = float(v)
+        except Exception:
+            # 数据源不可用时退回归一值(至少曲线形状对, 但与盘中口径不一致)
+            if "benchmark_unit_net_value" in pf.columns:
+                bm = pf["benchmark_unit_net_value"].astype(float).values
         eq = pd.DataFrame({
             "trade_date": [x.strftime("%Y%m%d") for x in pf.index],
             "equity": pf["total_value"].astype(float).round(2).values,
@@ -313,6 +338,20 @@ def run_one(name: str, mode: str, start: str, end: str, frequency: str,
         capital = capital or seed_cash
         print(f"[sim] 以回测 {seed_run} 为起点: 继承持仓 {len(init_positions)} "
               f"只(截至 {seed_date}) + 现金 {seed_cash}")
+    elif mode == "live":
+        # 连续 live 模拟: 继承本 run 上一交易日的结束持仓+现金。
+        # 为何必须: ① T+1 持仓过夜、次日才能卖 —— 不继承则昨日买入的票
+        # 今日凭空消失, clear_unsealed/OPT_A 的次日卖出逻辑全部落空;
+        # ② 跨日净值连续 —— 不继承则今日以配置资金空仓重启, equity
+        # 曲线出现断崖(实测: 昨日 1023711 → 今日重置 1000000)。
+        # 首日无历史(positions/equity 缺失)则 seed_from_run 抛异常 → 空仓开始。
+        try:
+            init_positions, seed_cash, seed_date = seed_from_run(run_id)
+            capital = capital or seed_cash
+            print(f"[sim] 继承上一交易日({seed_date})结束状态: "
+                  f"持仓 {len(init_positions)} 只 + 现金 {seed_cash}")
+        except Exception as e:
+            print(f"[sim] 无上一交易日结束状态, 空仓开始({e})")
     write_meta(run_dir, id=run_id, kind=kind, strategy=name, mode=mode,
                start=str(start), end=str(end), freq=frequency,
                capital=int(capital or cfg.get("capital") or 1000000),
@@ -355,7 +394,7 @@ def run_one(name: str, mode: str, start: str, end: str, frequency: str,
         eq = metrics.load_equity(run_dir / "equity.parquet")
         m = metrics.compute_metrics(eq)
         st = state.load_state(run_dir, end)
-        write_meta(run_dir, status="done", error=None, metrics=m,
+        write_meta(run_dir, status="done", error=None, warn=None, metrics=m,
                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                    duration_sec=round(time.time() - t0, 1))
         print(f"[sim] {name} 完成: 净值 {st.get('equity')} "

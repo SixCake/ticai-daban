@@ -71,7 +71,28 @@ DATASETS = {
         "涨停事件×概念独占归属(迭代投票)"),
     "theme.day": (
         "theme/1d/theme_day.parquet", "1d", False,
-        "题材日度快照: 涨停数/连板/龙头/归属家数/年龄"),
+        "题材日度快照: 涨停数/连板/龙头/归属家数/持续性天数(theme_age)/"
+        "归因自由关联家数(zt_all)/波次(wave_no) —— 题材阶段由波次驱动"
+        "(core.cycle.theme_stage), theme_age 仅作持续性展示"),
+    "theme.hierarchy": (
+        "theme/static/hierarchy.parquet", "static", False,
+        "题材分层树(THS+kpl合并): 成员包含率推父子, level/parent_code/"
+        "scope_tier/跨口径映射; build_theme_taxonomy.py 产出"),
+    "theme.kb_theme": (
+        "theme/static/kb_theme.parquet", "static", False,
+        "题材知识库-题材档案结构化: 驱动类型/父题材/第一催化(含置信度)/"
+        "生命周期阶段轴/证伪条款/环境前提/剧本引用"),
+    "theme.kb_stock": (
+        "theme/static/kb_stock.parquet", "static", False,
+        "题材知识库-个股四维画像: 产业链环节/角色/核心壁垒/兑现周期/"
+        "竞争格局/天花板/受益纯度/四维评分(原料复用 kpl_members.desc)"),
+    "theme.kb_similarity": (
+        "theme/static/kb_similarity.parquet", "static", False,
+        "题材知识库-题材相似边: a_code/b_code/相似度/三维分项"
+        "(驱动逻辑/产业链结构/资金结构)"),
+    "theme.kb_signal": (
+        "theme/static/kb_signal.parquet", "static", False,
+        "题材知识库-退潮/切换信号清单: 剧本引用/阶段/信号/类型/置信度"),
     "market.daily_panel": (
         "market/1d/daily_panel.parquet", "1d", False,
         "全A日度行情面板(涨跌幅/成交额/换手/涨停价), 约200MB"),
@@ -83,6 +104,10 @@ DATASETS = {
         "factor/1d/longtou.parquet", "1d", False,
         "龙头因子日表(研究22/23): 决策日×个股, 含炸板疤痕/行业地位/"
         "量比/连跌+市场级zt/ld/ldlr/qscore/sscore"),
+    "factor.shape_panel": (
+        "factor/shape_panel.parquet", "static", False,
+        "K线形态/阻力点/突破点因子数据集(研究37/38): 触板股×18个几何因子"
+        "+T+1/T+2/T+3标签。因子定义唯一出处 core/shape.py"),
     "meta.trade_cal": (
         "meta/trade_cal.parquet", "static", False,
         "SSE交易日历缓存"),

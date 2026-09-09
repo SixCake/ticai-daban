@@ -15,7 +15,16 @@
   D4 放量下跌: D1 且当笔成交额增速 > 近5分钟均速
 
 事件后结局回填 +5/+10/+20分钟: 概念均跌/下跌家数占比/中军,
-跷跷板对手概念的热度变化与领涨股涨幅(验证资金切换是否成立)。
+跷跷板对手板块拐头后的均涨增量/放量倍数(复评坐实资金切换是否成立)。
+
+对手板块口径(跷跷板=存量资金从龙头板块切向另一独立板块, 非追当日强势):
+  候选仅在监测热题(热度TOP10∪涨停≥4)中选, 三闸并行:
+    ②题材独立: 与龙头概念成分重叠率≤OVERLAP_MAX 且名称不同主题根
+    ③资金流入: 板块均涨3分钟增量≥OPP_DAVG_MIN 且放量倍数≥OPP_AMT_MIN
+      (放量倍数=近2min成交额增速/前2-6min增速, 板块级量价流入证据)
+    ④体量匹配: 候选须为监测热题(隐含于con_series), 排除微概念
+  轮动打分=0.5·均涨增量+0.3·放量+0.2·上涨家数增量(取近期增量而非
+  绝对水平, 以区分'跷跷板轮动'与'当日一直在涨的强势板块')。
 
 事件流落盘 data/live/seesaw_YYYYMMDD.jsonl:
   kind=trigger 触发快照 | kind=outcome 结局回填(含观察点分钟数 m)
@@ -36,6 +45,10 @@ OBS_MIN = (5, 10, 20)  # 结局观察点(分钟)
 MIN_WATCH = 180        # 龙头至少观察时长(秒), 防启动期噪音
 OPP_TOPN = 5           # 跷跷板对手概念数
 MONITOR_TOPN = 10      # 热度前N概念纳入监测
+# 对手板块闸阈值(跷跷板资金流入耦合+题材独立)
+OVERLAP_MAX = 0.4      # 对手与龙头成分重叠率上限(题材独立闸)
+OPP_DAVG_MIN = 0.15    # 对手板块均涨3分钟增量下限(资金流入闸)
+OPP_AMT_MIN = 1.2      # 对手放量倍数下限(近2min成交额增速/前2-6min)
 
 
 def _concept_avg(k: str, con2stock: dict, quotes: dict) -> float | None:
@@ -51,6 +64,14 @@ def _concept_amount(k: str, con2stock: dict, quotes: dict) -> float:
     return sum(quotes[c]["amount"] for c in con2stock.get(k, [])
                if c in quotes and "ST" not in quotes[c]["name"]
                and quotes[c]["limit_px"] > 0)
+
+
+def _concept_up_ratio(k: str, con2stock: dict, quotes: dict) -> float:
+    """概念成分上涨家数占比(板块级资金流入的广度口径)"""
+    qs = [quotes[c]["pct"] for c in con2stock.get(k, [])
+          if c in quotes and "ST" not in quotes[c]["name"]
+          and quotes[c]["limit_px"] > 0]
+    return round(sum(1 for p in qs if p > 0) / len(qs), 3) if qs else 0.0
 
 
 def _concept_stats(k: str, con2stock: dict, quotes: dict) -> dict | None:
@@ -111,6 +132,8 @@ class SeesawTracker:
         self._heat_rows_cache: list = []  # 当cycle热度行, 供跷跷板候选筛选
         self._zj_codes: set = set()     # 监测概念中军票(分时扩围用)
         self.con_day: dict = {}         # concept -> [[HHMMSS, 板块均涨], ...] 板块级分时
+        self.con_series: dict = {}      # concept -> deque[(t,均涨,成交额Σ,上涨占比)] 盘中资金流入口径(不跨日)
+        self._con_sets: dict = {}       # concept -> 成分集合(题材独立闸重叠率缓存)
         self._con_reload(live_dir, day_str)
         self._reload()
 
@@ -228,14 +251,22 @@ class SeesawTracker:
                 z = max(cands, key=lambda q: q["amount"])
                 self._zj_codes |= {c for c in self.con2stock.get(k, [])
                                    if c in quotes and quotes[c] is z}
-        # 板块级分时序列(跷跷板板块对比口径): 每cycle记监测概念均涨幅
+        # 板块级分时序列(跷跷板板块对比口径): 每cycle记监测概念均涨幅;
+        # con_series 另记成交额Σ/上涨占比, 供对手板块资金流入闸(放量)判定
         hms = ts_str.replace(":", "")
         for r in mon:
-            avg = _concept_avg(r["concept_code"], self.con2stock, quotes)
-            if avg is not None:
-                row = self.con_day.setdefault(r["concept_code"], [])
-                if not row or row[-1][0] != hms:
-                    row.append([hms, avg])
+            kc = r["concept_code"]
+            avg = _concept_avg(kc, self.con2stock, quotes)
+            if avg is None:
+                continue
+            row = self.con_day.setdefault(kc, [])
+            if not row or row[-1][0] != hms:
+                row.append([hms, avg])
+            cs = self.con_series.setdefault(kc, deque(maxlen=48))
+            if not cs or cs[-1][0] != t:
+                cs.append((t, avg,
+                           _concept_amount(kc, self.con2stock, quotes),
+                           _concept_up_ratio(kc, self.con2stock, quotes)))
         for r in mon:
             k = r["concept_code"]
             for code, calibers in self._leaders_of(k, quotes).items():
@@ -277,29 +308,7 @@ class SeesawTracker:
 
     def _trigger(self, k, heat_row, code, q, calibers, defs, st, s3,
                  quotes, t, ts_str) -> dict:
-        # 跷跷板候选: 其他概念中 热度3分钟增量为正 且 头部涨速为正
-        dheat_by = {}
-        for k2, hh in self.heat_hist.items():
-            if k2 == k:
-                continue
-            d = window_diff(hh, 180, t)
-            if d > 0:
-                dheat_by[k2] = d
-        opp = []
-        for r2 in sorted(
-                (r2 for r2 in self._heat_rows_cache
-                 if r2["concept_code"] in dheat_by
-                 and r2.get("s3", 0) > 0),
-                key=lambda x: -dheat_by[x["concept_code"]])[:OPP_TOPN]:
-            k2 = r2["concept_code"]
-            top = self._top_gainer(k2, quotes)
-            opp.append({"concept_code": k2, "name": r2["name"],
-                        "heat": r2["heat"],
-                        "dheat": round(dheat_by[k2], 2),
-                        "s3": r2.get("s3", 0),
-                        "avg_pct": _concept_avg(k2, self.con2stock,
-                                                quotes),
-                        "top": top})
+        opp = self._find_opponents(k, code, quotes, t)
         ev = {
             "kind": "trigger", "date": self.day, "t": ts_str, "te": t,
             "concept_code": k, "concept_name": heat_row["name"],
@@ -316,7 +325,7 @@ class SeesawTracker:
         print(f"[{ts_str}] 龙头拐头 {heat_row['name']} "
               f"{q['name']}({'+'.join(calibers)}) {'+'.join(defs)} "
               f"{q['pct']:.2f}% 高{st['max_pct']:.2f}% "
-              f"对手{[o['name'] for o in opp[:3]]}")
+              f"对手{[(o['name'], o['amt_accel']) for o in opp[:3]]}")
         return ev
 
     def _top_gainer(self, k: str, quotes: dict) -> dict | None:
@@ -330,34 +339,120 @@ class SeesawTracker:
         return {"code": mem[0], "name": q["name"],
                 "pct": round(q["pct"], 2)}
 
+    # ---------- 跷跷板对手板块(资金流入耦合+题材独立) ----------
+    def _member_set(self, k: str) -> set:
+        s = self._con_sets.get(k)
+        if s is None:
+            s = set(self.con2stock.get(k, []))
+            self._con_sets[k] = s
+        return s
+
+    @staticmethod
+    def _at(series, target: float):
+        """时序中首个 ts≥target 的样本; 无则回退最早样本"""
+        for row in series:
+            if row[0] >= target:
+                return row
+        return series[0]
+
+    def _sector_flow(self, k: str, t: float):
+        """板块级资金流入: (均涨3min增量, 上涨占比3min增量, 放量倍数)
+        放量倍数=近2min成交额增速/前2-6min增速; 样本不足返回None"""
+        s = self.con_series.get(k)
+        if not s or len(s) < 2:
+            return None
+        now = s[-1]
+        p180 = self._at(s, t - 180)
+        d_avg = round(now[1] - p180[1], 2)
+        d_up = round(now[3] - p180[3], 3)
+        a_r, a_p = self._at(s, t - 120), self._at(s, t - 360)
+        accel = None
+        if a_p[0] < a_r[0] < now[0]:
+            v_recent = (now[2] - a_r[2]) / (now[0] - a_r[0])
+            v_prior = (a_r[2] - a_p[2]) / (a_r[0] - a_p[0])
+            if v_prior > 0:
+                accel = v_recent / v_prior
+        return d_avg, d_up, accel
+
+    def _find_opponents(self, k: str, code: str, quotes: dict,
+                        t: float) -> list:
+        """跷跷板对手: 存量资金从龙头板块k切向的独立放量上涨板块(监测热题内)"""
+        kset = self._member_set(k)
+        kn = self.cname.get(k, k)          # kpl口径concept_code即概念名, cname空时回退code
+        heat_by = {r["concept_code"]: r["heat"]
+                   for r in self._heat_rows_cache}
+        cands = []
+        for k2 in self.con_series:
+            if k2 == k:
+                continue
+            s2 = self.con_series[k2]
+            if not s2 or s2[-1][0] < t - 180:   # 近3min未监测=数据陈旧, 跳过
+                continue
+            # ①同龙头闸: 候选含本龙头票=同一批钱(如四方精创同时在
+            # 数字货币/稳定币/华为甄选), 其上涨由同一只拐头票驱动, 非对手
+            if code in self._member_set(k2):
+                continue
+            # ②题材独立: 成分重叠率 + 名称同主题根
+            if kset and len(kset & self._member_set(k2)) / len(kset) \
+                    > OVERLAP_MAX:
+                continue
+            n2 = self.cname.get(k2, k2)
+            if kn and n2 and len(kn) >= 2 and (kn[:2] in n2 or n2[:2] in kn):
+                continue
+            # ③资金流入(板块级放量上涨)
+            flow = self._sector_flow(k2, t)
+            if flow is None:
+                continue
+            d_avg, d_up, accel = flow
+            if d_avg < OPP_DAVG_MIN or accel is None or accel < OPP_AMT_MIN:
+                continue
+            # 轮动打分: 近期增量为主(区分跷跷板轮动 vs 当日强势板块)
+            score = (0.5 * min(d_avg, 1.5) / 1.5
+                     + 0.3 * min(max(accel - 1, 0), 2) / 2
+                     + 0.2 * min(max(d_up, 0), 0.3) / 0.3)
+            cands.append({
+                "concept_code": k2, "name": n2,
+                "heat": heat_by.get(k2), "score": round(score, 3),
+                "d_avg": round(d_avg, 2), "d_up": round(d_up, 3),
+                "amt_accel": round(accel, 2),
+                "avg_pct": _concept_avg(k2, self.con2stock, quotes),
+                "top": self._top_gainer(k2, quotes)})
+        cands.sort(key=lambda x: -x["score"])
+        return cands[:OPP_TOPN]
+
     # ---------- 结局回填 ----------
     def _fill_outcomes(self, quotes: dict, heat_rows: list, t: float,
                        ts_str: str):
-        heat_by = {r["concept_code"]: r["heat"] for r in heat_rows}
         for ev in self.events:
             outs = ev.setdefault("outcomes", {})
             for m in OBS_MIN:
                 if str(m) in outs or t < ev["te"] + m * 60:
                     continue
-                opp_now = []
+                opp_now, n_conf = [], 0
                 for o in ev.get("opp", []):
                     k2 = o["concept_code"]
-                    h0 = o.get("heat", 0)
+                    a0 = o.get("avg_pct")
+                    a_now = _concept_avg(k2, self.con2stock, quotes)
+                    flow = self._sector_flow(k2, t)
+                    accel = round(flow[2], 2) if flow and flow[2] else None
                     top = self._top_gainer(k2, quotes)
+                    d_since = (round(a_now - a0, 2)
+                               if a_now is not None and a0 is not None
+                               else None)
+                    # 坐实: 拐头后对手板块均涨较触发时点走高=资金确实切入
+                    conf = bool(d_since is not None and d_since > 0)
+                    n_conf += conf
                     opp_now.append({
                         "concept_code": k2, "name": o["name"],
-                        "heat": heat_by.get(k2),
-                        "dheat": (round(heat_by[k2] - h0, 2)
-                                  if k2 in heat_by else None),
-                        "avg_pct": _concept_avg(k2, self.con2stock,
-                                                quotes),
+                        "avg_pct": a_now, "d_since": d_since,
+                        "amt_accel": accel, "confirmed": conf,
                         "top_pct": top["pct"] if top else None,
                         "top_code": top["code"] if top else None})
                 outs[str(m)] = {
                     "t": ts_str,
                     "members": _concept_stats(ev["concept_code"],
                                               self.con2stock, quotes),
-                    "opp": opp_now}
+                    "opp": opp_now, "n_conf": n_conf}
                 rec = {"kind": "outcome", "date": self.day,
                        "te": ev["te"], "concept_code": ev["concept_code"],
                        "leader_code": ev["leader_code"], "m": m,

@@ -9,6 +9,7 @@
 + 最后封板≤11:00(午前回封)
 炸板池接口被网络封锁, 用涨停池快照diff做断板状态机: 出池=炸板, 再入池=回封
 """
+import bisect
 import json
 import sys
 import time
@@ -25,11 +26,12 @@ from core.attribute import (attribute_of, conf_level, load_con2stock,  # noqa: E
 from core.calendar import is_polling_hours  # noqa: E402
 from core.cycle import (divg_of, height_dist,  # noqa: E402
                         load_prev_market_state as calc_prev_state,
-                        stage_of, theme_mode)
+                        stage_of, theme_stage)
 from core.roles import RoleContext, roles_of  # noqa: E402
 from core.shortboard import (HB_LIMIT, N_WINDOW, PEAK_WIN, STATE_ORDER,  # noqa: E402
                             STATE_RISK, build_cohort, shortboard_snapshot,
                             shortboard_state_of)
+from core.theme_wave import activity_panel, next_wave_no, wave_state  # noqa: E402
 from core.times import is_before  # noqa: E402
 from datastore import load, path_of, save  # noqa: E402
 from quotes import fetch_quotes  # noqa: E402  # QUOTE_SOURCE分发: tx|qmt
@@ -87,7 +89,7 @@ def get_prev_state(date: str):
 
 
 def _shortboard_baseline(date: str, days: list):
-    """龙头短板cohort基线: 近N日题材龙头(∪引领题材名) + 市场高板(连板≥HB_LIMIT)
+    """龙头断板cohort基线: 近N日题材龙头(∪引领题材名) + 市场高板(连板≥HB_LIMIT)
     + 名称。days=交易日历(升序)。返回 (led, hb_lt, names)。"""
     di = days.index(date) if date in days else len(days)
     win = days[max(0, di - N_WINDOW):di]        # 近N日(严格早于当日)
@@ -114,7 +116,7 @@ def _shortboard_baseline(date: str, days: list):
 
 def _shortboard_bars(codes, date: str) -> dict:
     """{code: [(date,high,low,close,vol,pct_chg)] 升序, 严格<T的末PEAK_WIN+2根},
-    供盘中龙头短板峰谷/结构字段。过滤trade_date<date保证恒≤T-1(与复盘
+    供盘中龙头断板峰谷/结构字段。过滤trade_date<date保证恒≤T-1(与复盘
     prior_bars同口径), 不受面板是否已补到当日影响。"""
     codes = list(codes)
     if not codes:
@@ -137,17 +139,21 @@ class DayState:
     def __init__(self, date: str, stock2con: dict, msize: dict, cname: dict,
                  age_base: dict, con2stock: dict, att_set: set,
                  att_dates: list, prev_state=None,
-                 sb_led=None, sb_hb_lt=None, sb_names=None, sb_bars=None):
+                 sb_led=None, sb_hb_lt=None, sb_names=None, sb_bars=None,
+                 wave_base=None, wave_dates=None):
         self.date = date
         self.stock2con = stock2con
         self.msize = msize
         self.cname = cname
         self.age_base = age_base      # concept -> 截至上一交易日的连续活跃天数
+        # 题材波次基线(研究39): concept -> (wave_no, last_pos, last_zt_all)
+        self.wave_base = wave_base or {}
+        self.wave_dates = wave_dates or []
         self.con2stock = con2stock
         self.att_set = att_set        # (trade_date, ts_code, concept_code) 历史归属
         self.att_dates = att_dates
         self.prev_state = prev_state  # 昨日market_state(情绪周期参照)
-        # 龙头短板层(研究29, 展示/风险标注): 基线cohort + ≤T-1日bar
+        # 龙头断板层(研究29, 展示/风险标注): 基线cohort + ≤T-1日bar
         self.sb_led = sb_led or {}        # code -> 引领题材名
         self.sb_hb_lt = sb_hb_lt or {}    # code -> 窗口内最大连板
         self.sb_names = sb_names or {}
@@ -190,6 +196,12 @@ class DayState:
                                     ascending=[False, False, True, True])
             leader = rows.iloc[0]
             age = self.age_base.get(k, 0) + 1
+            # 题材阶段(研究39 定稿): 锚点是波次而非日龄。theme_age 仅作
+            # 持续性展示("N天"), 不再驱动阶段。波次口径走 core.theme_wave,
+            # 与离线 build/theme_daily.py 完全一致。
+            zt_all = raw_cnt.get(k, 0)
+            wpos = bisect.bisect_left(self.wave_dates, self.date)
+            wave_no = next_wave_no(self.wave_base.get(k), wpos, zt_all)
             # 行业纯度: 独占成员主导行业占比, <60%且≥3只=虹吸嫌疑(展示层标⚠离散)
             inds = rows["所属行业"].dropna().tolist()
             top_ind, ind_share = "-", None
@@ -202,7 +214,9 @@ class DayState:
                 "zt_cnt_raw": raw_cnt.get(k, 0),
                 "max_height": int(rows["连板数"].max()),
                 "theme_age": age,
-                "mode": theme_mode(age),
+                "zt_all": zt_all,
+                "wave_no": wave_no,
+                "mode": theme_stage(wave_no, zt_all),
                 "leader_code": leader.name, "leader_name": leader["名称"],
                 "leader_height": int(leader["连板数"]),
                 "ind_top": top_ind, "ind_share": ind_share,
@@ -233,7 +247,7 @@ class DayState:
                 zj = max(cands, key=lambda x: x["amount"])
                 t["zhongjun"] = {"name": zj["name"], "pct": zj["pct"],
                                  "amount": zj["amount"]}
-        # ---- 高位龙头短板(研究29, 展示/风险标注): cohort-今日池, 报价+≤T-1结构算5态 ----
+        # ---- 高位龙头断板(研究29, 展示/风险标注): cohort-今日池, 报价+≤T-1结构算5态 ----
         sb_cand = [c for c in dict.fromkeys(list(self.sb_led) + list(self.sb_hb_lt))
                    if c not in new_set]
         sb_list = []
@@ -398,14 +412,35 @@ def main():
                 age_base[k] = streak
         print(f"题材年龄基线: 截至{last_pd_date}, {len(age_base)}个题材")
 
+    # 题材波次基线(研究39): 与离线 build/theme_daily.py 同口径
+    # (归因自由活跃面板 + 空档≥WAVE_COOLDOWN 判新波)
+    wave_base, wave_dates = {}, []
+    try:
+        wave_dates = sorted(load("limitup.events_enriched",
+                                columns=["trade_date"])["trade_date"].unique())
+        wave_base = wave_state(activity_panel(), list(wave_dates))
+        print(f"题材波次基线: {len(wave_base)}个题材, "
+              f"最大波次 {max((v[0] for v in wave_base.values()), default=0)}")
+    except Exception as e:
+        print(f"题材波次基线构建失败(阶段将置空): {e}")
+
     state = None
     cur_date = None
+    boot_day = today          # 启动日: 跨天检测基准
     print(f"轮询引擎启动, 最近交易日 {last_td}, 间隔 {INTERVAL}s")
     while True:
         now = datetime.now()
         trading = is_polling_hours(now)
         today = now.strftime("%Y%m%d")
         hm = now.strftime("%H%M")
+        # 跨天刷新交易日历: days/last_td 仅在启动时算一次, 跨天后新交易日
+        # 不在旧 days 里 → today in days 恒 False → target 永远回退启动日
+        # last_td, latest.json 的 date 卡在昨天(实测 20260908 盘中仍标 20260907)。
+        if today != boot_day:
+            days = trade_days_upto(today)
+            last_td = days[-1]
+            boot_day = today
+            print(f"[{now:%H:%M:%S}] 跨天刷新交易日历, 最近交易日 {last_td}")
         # akshare对未开盘日期会返回上一交易日数据, 须自行定标
         if today in days and hm >= "0915":
             target = today          # 盘中实时 / 收盘后当日终值
@@ -422,10 +457,11 @@ def main():
                                  con2stock, att_set, att_dates,
                                  prev_state=get_prev_state(target),
                                  sb_led=sb_led, sb_hb_lt=sb_hb_lt,
-                                 sb_names=sb_names, sb_bars=sb_bars)
+                                 sb_names=sb_names, sb_bars=sb_bars,
+                                 wave_base=wave_base, wave_dates=wave_dates)
                 cur_date = target
                 print(f"[{now:%H:%M:%S}] 初始化 {target}, 池内 {len(pool)} 只, "
-                      f"龙头短板cohort {len(set(sb_led) | set(sb_hb_lt))} 只")
+                      f"龙头断板cohort {len(set(sb_led) | set(sb_hb_lt))} 只")
         if state is not None:
             pool = fetch_pool(cur_date)
             if pool is not None:

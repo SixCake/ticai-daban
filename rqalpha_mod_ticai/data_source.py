@@ -220,6 +220,12 @@ class TicaiDataSource:
                     "exchange": exchange_of(rq_id),
                     "board_type": _board_type(code),
                     "round_lot": 100,
+                    # A股 T+1: 必须显式设 market_tplus=1, 否则 Instrument
+                    # 默认 market_tplus=0(instrument.py: .get() or 0) →
+                    # StockPosition 不把当日买入计入 _non_closable →
+                    # closable=全部持仓 → T+1 形同虚设, 当日买入当日
+                    # 就能卖(实测踩坑: 09:30 买入 14:55 就清仓了)
+                    "market_tplus": 1,
                     "status": "Active" if code in names else "Delisted",
                     "listed_date": _int_to_date_str(first),
                     "de_listed_date": de_listed,
@@ -753,7 +759,18 @@ class TicaiDataSource:
         pos = _search_dt(bars, dt, include_now=True)
         if pos < 0:
             return None
-        v = float(bars["prev_close"][pos])
+        # 关键: 盘中 live 时面板往往未补到 dt 当日(只到上一交易日)。
+        #   命中 bar 日期 == dt 当日 → 该行 prev_close 字段就是 dt 的昨收;
+        #   命中 bar 日期 <  dt 当日(dt 超出面板) → dt 的昨收应是该 bar 的
+        #     close(最后可得收盘), 而非它的 prev_close 字段(那是再前一日收盘)。
+        # 实测踩坑: 20260907 盘中面板只到 20260904, 旧逻辑取 20260904 行的
+        # prev_close(=20260903收盘 13.75) 而非 close(15.13) → 涨停价算成
+        # 15.13(应为 16.64) → 合法打板单被撮合器误拒「限价高于涨停价」。
+        bar_date = _int_to_date_str(int(bars["datetime"][pos]))
+        if bar_date < _date_str_of(dt):
+            v = float(bars["close"][pos])
+        else:
+            v = float(bars["prev_close"][pos])
         return v if v > 0 else None
 
     def benchmark_close(self, order_book_id: str, dt) -> float | None:

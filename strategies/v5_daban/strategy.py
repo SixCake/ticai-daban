@@ -44,6 +44,7 @@ def init(context):
     context.candidates = set()
     context.entry = {}            # code -> {ep, hi}
     context.traded = set()
+    context.failed = set()        # 当日下单被拒/一字板买不进的票(不再重试)
     context.pending = {}          # code -> order_id（在途挂单占仓）
     context.risk_off = False      # AI 风险 feed 判定的当日规避开关
     # after_trading 阶段不能下单(rqalpha 报 "You cannot call
@@ -65,6 +66,7 @@ def before_trading(context):
     passed = {c for c, s in struct.items() if s.get("gate")}
     context.candidates = passed
     context.traded = set()
+    context.failed = set()        # 每日重置拒单名单
 
     # ---- AI feed 订阅(时间戳闸门已由框架施加, 无需自己过滤时间) ----
     # 只能读 config.yaml 里声明过的 feed; 未声明会被拒绝并告警
@@ -171,6 +173,7 @@ def handle_bar(context, bar_dict):
             if s["stage"] in ("S2", "S3")
             and s["code"] in context.candidates
             and s["code"] not in context.traded
+            and s["code"] not in context.failed
             and s["code"] not in context.pending
             and s["code"] not in context.portfolio.positions]
     if not sigs:
@@ -182,23 +185,43 @@ def handle_bar(context, bar_dict):
         px = float(s.get("price0") or 0)
         if px <= 0:
             continue
-        cash_per = min(context.portfolio.total_value / MAXPOS,
-                       context.portfolio.cash)   # cash = 可用资金
-        qty = int(cash_per / px / 100) * 100
-        if qty < 100:
-            logger.info(f"现金不足一手 跳过 {code} "
-                        f"(可用{context.portfolio.cash:.0f} 需{px * 100:.0f})")
-            continue
-        # 高挂限价: 触发价×1.005, 涨停价封顶（实盘扫板同款挂法）
+        # 涨停价: 优先用信号自带 limit_px(雷达精确口径), 兜底用 bar 的
+        # limit_up。用于封顶挂价 + 识别一字板(触发价已≥涨停价买不进)。
+        limit_up = float(s.get("limit_px") or 0) or None
         pre = None
         if code in bar_dict:
-            pc = bar_dict[code].prev_close
+            bar = bar_dict[code]
+            if not limit_up:
+                lu = bar.limit_up
+                limit_up = float(lu) if lu == lu else None
+            pc = bar.prev_close
             pre = float(pc) if pc == pc else None
-        lmt = limit_price_of(px, pre)
+        # 高挂限价: 触发价×1.005, 涨停价封顶（实盘扫板同款挂法）
+        lmt = limit_price_of(px, pre, limit_up=limit_up)
+        # 挂价被涨停价封顶 → 触发价已贴近/超过涨停价(一字板或已封死),
+        # rqalpha price_limit 必拒单。跳过并记入 failed, 否则每 cycle 反复
+        # 触发同一拒单 → 日志被「订单创建失败」刷屏(实测 603696 刷 10+ 次)
+        if limit_up and lmt >= limit_up:
+            context.failed.add(code)
+            logger.info(f"跳过 {code}: 触发{px:.2f} 涨停{limit_up:.2f} "
+                        f"(已封/一字板, 买不进)")
+            continue
+        cash_per = min(context.portfolio.total_value / MAXPOS,
+                       context.portfolio.cash)   # cash = 可用资金
+        # 数量按限价 lmt(而非触发价 px)算 —— 下单成本 = qty×lmt,
+        # 若用 px 算则成本高出 slip(0.5%), 现金接近耗尽时会超出可用
+        # 资金被拒「可用资金不足」(实测: 末仓 600227/601579 被拒)
+        qty = int(cash_per / lmt / 100) * 100
+        if qty < 100:
+            logger.info(f"现金不足一手 跳过 {code} "
+                        f"(可用{context.portfolio.cash:.0f} 需{lmt * 100:.0f})")
+            continue
         # rqalpha 的限价单类叫 LimitOrder(聚宽叫 LimitOrderStyle)
         od = order_shares(code, qty, LimitOrder(lmt))
         if od is None:
-            continue                        # 下单失败(涨停/停牌等)
+            # 下单失败(涨停/停牌等): 记入 failed 当日不再重试, 防拒单刷屏
+            context.failed.add(code)
+            continue
         context.traded.add(code)
         context.pending[code] = od.order_id
         context.entry[code] = {"ep": px, "hi": px}
@@ -232,7 +255,11 @@ def clear_unsealed(context, bar_dict):
 
 def after_trading(context):
     """收盘(15:30): 只能读不能下单, 故只做当日复盘日志"""
-    n_pos = len(context.portfolio.positions)
+    # 只数 quantity>0 的真实持仓 —— 14:55 清仓后 position 对象仍残留
+    # (quantity=0), len(positions) 会把它们也计入 → 与结算持仓数对不上
+    # (实测: 清仓 3 只后这里报「持仓 3 只」, 而结算报「持仓 0」)
+    n_pos = sum(1 for p in context.portfolio.positions.values()
+                if float(getattr(p, "quantity", 0) or 0) > 0)
     logger.info(f"收盘: 持仓 {n_pos} 只, 当日买入尝试 "
                 f"{len(context.traded)} 笔")
 

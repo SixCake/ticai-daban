@@ -11,7 +11,11 @@
 字段口径对齐腾讯源:
   price/pct  ← tick lastPrice/lastClose（降级时: 日bar最新/次新close）
   amount(元) ← tick当日累计成交额
-  volume(股) ← tick当日累计成交量(竞价时段即竞价量, 供竞价量比)
+  volume(股) ← tick当日累计成交量(竞价时段即竞价量, 供竞价量比)。
+                QMT 的 tick 与日bar volume 量纲统一是「手」(不分板块,
+                实测 amount/(vol*100)=均价 在主/创业/科创三板块均成立),
+                与腾讯 API 的分板块量纲不同; _row 出口统一×100归一为股,
+                量比仍在归一前按手/手同口径算(近5日均量同为手)
   vr(量比)   ← 今日每分钟均量 / 近5日每分钟均量（近5日量每日缓存一次）;
                 竞价时段 emin=1 → 即竞价量比, 与 stk_auction 同口径
   limit_px   ← 昨收×涨幅上限取2位（主板10% / 创业板·科创20% / ST 5%）
@@ -105,7 +109,8 @@ def build_names(codes: list | None = None) -> dict:
 
 
 def _avg5vol(codes: list) -> dict:
-    """近5个已完成交易日日均成交量(股)缓存; 日内不变, 每日首调构建"""
+    """近5个已完成交易日日均成交量(手, QMT日bar量纲)缓存;
+    日内不变, 每日首调构建"""
     today = datetime.now().strftime("%Y%m%d")
     cache = _load_cache("qmt_avg5vol.json")
     data = cache.get("data", {}) if cache.get("date") == today else {}
@@ -230,6 +235,73 @@ def _ensure_push():
     threading.Thread(target=run, daemon=True).start()
 
 
+def warm_push():
+    """竞价预热入口: 只拉起推送订阅, 不拉行情。
+
+    推送是**增量**的: 全市场竞价撮合 tick 在 09:25:00~09:25:04 一次性
+    下发, 订阅晚于这波就永久采不到竞价量(而 09:25~09:30 是静默期,
+    实测 12s 仅累积 13 条 tick)。故雷达必须在 09:15~09:25 预热段先
+    调本函数把订阅建好(20260904/20260907 竞价量比全缺的根因)。"""
+    _ensure_push()
+
+
+# ---------- 竞价量拉取快路径（不依赖订阅时机） ----------
+
+_pull = {"ts": 0.0, "data": {}}
+_pull_lock = threading.Lock()
+PULL_TTL = 3.0        # 全市场一次 RPC ~4s, 同轮多批复用同一快照
+
+
+def fetch_auction_pull() -> dict:
+    """竞价量拉取快路径: get_full_tick 主动拉全市场, 与 fetch_quotes 同契约。
+
+    仅 09:25:00~09:29:59 有效(该时段无连续竞价成交, tick 当日累计量
+    就是竞价量); 窗口外一律返回 {} 绝不冒充(09:30 后竞价量混入盘中
+    成交永久不可分离)。与推送路径的区别: 推送是增量流, 订阅晚于
+    09:25:00~04 的竞价撮合波就永远拿不到竞价量(实测推送表仅 13 条→
+    fetch_quotes 全批返回空→雷达兜底腾讯源→快照 n_vr=0);
+    拉取式一次拿全市场 ~4s(实测 51074 条, 7312 有量), 不受订阅时机影响。
+    量比口径与推送路径完全一致(emin=1, 手/手)。"""
+    now = datetime.now()
+    hm = now.hour * 60 + now.minute
+    if not (9 * 60 + 25 <= hm < 9 * 60 + 30):
+        return {}
+    if time.time() - _pull["ts"] < PULL_TTL:
+        return _pull["data"]
+    with _pull_lock:
+        if time.time() - _pull["ts"] < PULL_TTL:
+            return _pull["data"]
+        try:
+            ticks = _client().get_full_tick(["SH", "SZ"]) or {}
+        except Exception as e:
+            print(f"[qmt] 竞价拉取失败: {e}")
+            return {}
+        names = _names()
+        codes = [c for c in ticks if _valid(c)]
+        avg5 = _avg5vol(codes)
+        fmv = _floatmv()
+        emin = _elapsed_min(now)          # 竞价窗口恒为1
+        out = {}
+        for c in codes:
+            t = ticks.get(c) or {}
+            try:
+                row = _row(c, float(t.get("lastPrice") or 0),
+                           float(t.get("lastClose") or 0),
+                           float(t.get("volume") or 0),
+                           float(t.get("amount") or 0),
+                           names, avg5, fmv, emin,
+                           float(t.get("open") or 0))
+            except Exception:
+                row = None
+            if row:
+                out[c] = row
+        _pull.update(ts=time.time(), data=out)
+        if out:
+            print(f"[qmt] 竞价拉取 {len(out)}只 "
+                  f"量比可得{sum(1 for r in out.values() if r['vr'])}只")
+        return out
+
+
 # ---------- 主入口（与 quotes/tx.py 同契约） ----------
 
 # 横截面快照缓存: FormulaServer单连接串行, radar的60只/批×87批逐个排队
@@ -297,7 +369,8 @@ def _row(c: str, price: float, pre: float, vol: float, amt: float,
     return {
         "name": name, "price": price,
         "open": open_px,
-        "volume": vol,                      # 当日累计量(股), 供分时量/VWAP
+        "volume": vol * 100,               # QMT量纲是手→归一为股(对齐腾讯源);
+                                           # 上面的vr仍按手/手同口径算, 不受影响
         "pct": (price - pre) / pre * 100, "amount": amt,
         "float_mv": mv, "vr": round(vr, 3),
         "limit_px": round(pre * (1 + _limit_ratio(c, name)), 2),

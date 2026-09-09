@@ -70,7 +70,59 @@ def fetch_day(date: str) -> pd.DataFrame:
                 df = df.assign(tag=tag)
             parts.append(df)
         time.sleep(0.35)
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    if not parts:
+        return pd.DataFrame()
+    if len(parts) == 1:
+        return parts[0]
+    # 涨停/炸板列非空模式不同(涨停有lu_desc/status/limit_order, 炸板有open_time),
+    # concat 含 all-NA 列触发 pandas FutureWarning; 当前行为正确, 局部抑制保持输出干净
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        return pd.concat(parts, ignore_index=True)
+
+
+def backfill(start: str, end: str, batch: int = 100):
+    """向历史回填 [start, end] 区间的 kpl_list(补 main 前向增量之外的早年数据)。
+
+    kpl_list 接口实测 2018 年初即有 theme 题材标注(2017 及以前无), 而本地事件库
+    仅从 qmt-trade 缓存导入了 2024+, 故 2018~2023 的 kpl 题材标注可补拉, 为情绪型
+    复盘提供第二套(与 THS .TI 口径交叉验证)历史题材归属。
+
+    断点续传: 跳过库里已有交易日, 中断后重跑只补缺失; 每 batch 天落库一次。
+    复用 fetch_day(涨停+炸板+重试)与 main 一致的去重/排序口径。
+    """
+    p = path_of("limitup.kpl_events")
+    ev = load("limitup.kpl_events") if p.exists() else pd.DataFrame()
+    have = set(ev["trade_date"]) if len(ev) else set()
+    cal = pro.trade_cal(exchange="SSE", start_date=start, end_date=end,
+                        is_open="1")
+    days = [d for d in sorted(cal["cal_date"].tolist()) if d not in have]
+    if not days:
+        print(f"[backfill] {start}~{end} 全部已在库({len(have)}日), 无需回填")
+        return
+    print(f"[backfill] {start}~{end} 待回填 {len(days)} 个交易日 "
+          f"(库内已有 {len(have)} 日, 跳过重复)", flush=True)
+    buf = []
+    for i, d in enumerate(days, 1):
+        df = fetch_day(d)
+        if len(df):
+            buf.append(df)
+        if i % 25 == 0 or i == len(days):
+            print(f"  [{i}/{len(days)}] {d}: 本批 +{len(df)} 行", flush=True)
+        if i % batch == 0 or i == len(days):
+            if buf:
+                ev = pd.concat([ev] + buf, ignore_index=True)
+                ev = ev.drop_duplicates(subset=["trade_date", "ts_code", "tag"])
+                ev = ev.sort_values(
+                    ["trade_date", "tag", "ts_code"]).reset_index(drop=True)
+                save("limitup.kpl_events", ev)
+                buf = []
+                print(f"  <落库> {ev['trade_date'].min()}~{ev['trade_date'].max()} "
+                      f"共 {len(ev)} 行", flush=True)
+    print(f"[backfill] 完成: {len(ev)} 行 "
+          f"({ev['trade_date'].min()}~{ev['trade_date'].max()}) "
+          f"theme非空 {ev['theme'].notna().sum()}")
 
 
 def main():
@@ -119,4 +171,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) >= 4 and sys.argv[1] == "--backfill":
+        backfill(sys.argv[2], sys.argv[3])
+    else:
+        main()

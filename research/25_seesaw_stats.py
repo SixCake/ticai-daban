@@ -6,7 +6,7 @@
 
 统计内容:
   1. 各下跌定义(及组合)的事件数 / 跟跌命中率(+10min概念均跌恶化) / 平均跟跌幅度
-  2. 跷跷板对手概念持续性(+10/+20min热度增量仍为正的比例)
+  2. 跷跷板对手成立率(+10/+20min对手板块均涨较触发时点走高的比例)
   3. 按市场环境分段(强制方法论): 牛市/熊市/震荡市独立统计
 
 市场环境划分(市场级): 全A等权日收益20日均值 ma20
@@ -72,15 +72,23 @@ def follow_delta(t, key="o10"):
     return o["members"]["avg_pct"] - m["avg_pct"]
 
 
-def opp_persist(t, key="o10"):
-    """对手概念热度仍为正的比例"""
+def opp_confirm(t, key="o10"):
+    """对手成立率(对手级): 结局时点被坐实(均涨较触发走高)的对手占比。
+    新格式直接读 outcome.n_conf; 旧格式(无n_conf)回退avg_pct较触发时点比对"""
     o = t.get(key)
     if not o or not o.get("opp"):
-        return None, 0
-    ds = [x["dheat"] for x in o["opp"] if x.get("dheat") is not None]
-    if not ds:
-        return None, 0
-    return sum(1 for d in ds if d > 0) / len(ds), len(ds)
+        return None
+    n = len(o["opp"])
+    if not n:
+        return None
+    if "n_conf" in o:                    # 新格式: 拐头后复评已标坐实数
+        return o["n_conf"] / n
+    t0 = {x["concept_code"]: x.get("avg_pct") for x in t.get("opp", [])}
+    hit = sum(1 for x in o["opp"]
+              if x.get("avg_pct") is not None
+              and t0.get(x["concept_code"]) is not None
+              and x["avg_pct"] > t0[x["concept_code"]])
+    return hit / n
 
 
 def sect_persist(t, key="o10"):
@@ -104,16 +112,16 @@ def report(rows, title):
     df = pd.DataFrame(rows)
     df["fd10"] = df.apply(lambda t: follow_delta(t), axis=1)
     df["fd20"] = df.apply(lambda t: follow_delta(t, "o20"), axis=1)
-    p10 = [opp_persist(t) for t in rows]
-    p20 = [opp_persist(t, "o20") for t in rows]
-    df["op10"] = [p[0] for p in p10]
-    df["op20"] = [p[0] for p in p20]
+    p10 = [opp_confirm(t) for t in rows]
+    p20 = [opp_confirm(t, "o20") for t in rows]
+    df["oc10"] = p10
+    df["oc20"] = p20
     df["sp10"] = [sect_persist(t) for t in rows]
     df["sp20"] = [sect_persist(t, "o20") for t in rows]
 
     groups = []
     for r in range(1, len(DEFS) + 1):
-        groups += ["".join(c) for c in combinations(DEFS, r)]
+        groups += [list(c) for c in combinations(DEFS, r)]
     out = []
     for g in groups:
         sub = df[df["defs"].apply(lambda s: set(g) <= set(s))]
@@ -121,13 +129,13 @@ def report(rows, title):
         if n == 0:
             continue
         hit = (sub["fd10"] < -FOLLOW_EPS).mean()
-        out.append({"定义": g, "n": n,
+        out.append({"定义": "".join(g), "n": n,
                     "跟跌命中%": round(100 * hit, 1),
                     "跟跌幅度%": round(sub["fd10"].mean(), 2),
                     "20m跟跌%": round(sub["fd20"].mean(), 2),
                     "板块跷跷板10m%": round(100 * sub["sp10"].mean(), 1),
-                    "板块跷跷板20m%": round(100 * sub["sp20"].mean(), 1),
-                    "个股对手10m%": round(100 * sub["op10"].mean(), 1)})
+                    "对手成立10m%": round(100 * sub["oc10"].mean(), 1),
+                    "对手成立20m%": round(100 * sub["oc20"].mean(), 1)})
     print(pd.DataFrame(out).to_string(index=False))
     if len(df) < MIN_N:
         print(f"  ⚠ 样本{len(df)}<{MIN_N}, 继续积累数据, 不作选优结论")

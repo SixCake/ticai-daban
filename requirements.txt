@@ -15,3 +15,8 @@ rqalpha>=6.3
 
 # research/ 部分因子脚本用到; 主链路不需要
 scikit-learn>=1.3
+
+# AI 题材智能体多角色编排(core/ai_agent_graph.py)。只用其 StateGraph 编排,
+# LLM 调用仍走 core/llm.py(OpenAI 兼容), 不引入 langchain-openai ——
+# 保持 ADR-0003 "LLM 只在生产者"。实测 langgraph 1.2.x 与 pandas<3.0/rqalpha 共存无冲突。
+langgraph>=0.2

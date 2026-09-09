@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 题材打板监控平台 · 竞价 tick 勘探（模板）
+
+由 deploy/launchd/install.sh --job probe 渲染后写入 ~/Library/LaunchAgents/。
+
+为什么 09:14 触发: collect/probe_auction.py 要采 09:15~09:25 集合竞价全程
+(可撤单段 09:15~09:20 / 不可撤单段 09:20~09:25 / 09:25:00 撮合), 必须早于
+09:15 启动并留出 QMT 推送订阅预热时间。脚本内部还会自行等到 09:14:30。
+
+为什么必须早于雷达: 雷达 09:25:00 起扫描并调 subscribe_whole_quote, 与本
+探针**共用同一 account_id**(request_queue 按账号排队)。探针采集窗口在
+09:25:20 结束, 把两会话重叠压到 ~20s。若雷达日志出现订阅失败, 说明两会话
+确实冲突, 退路是把竞价采样折进 apps/radar.py 作盘前阶段(单会话)。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL}}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PROJECT_DIR}}/.venv/bin/python</string>
+        <string>{{PROJECT_DIR}}/collect/probe_auction.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{{PROJECT_DIR}}</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+    </array>
+    <!-- 不在 load 时立即启动: 收盘后加载不应拉起采集进程 -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{{PROJECT_DIR}}/logs/auction_probe.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{PROJECT_DIR}}/logs/auction_probe.log</string>
+</dict>
+</plist>

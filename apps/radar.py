@@ -21,13 +21,17 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from config import DATA, QUOTE_SOURCE  # noqa: E402
 from core.attribute import load_con2stock, load_maps  # noqa: E402
-from core.calendar import is_trading_hours  # noqa: E402
+from core.calendar import is_radar_hours, is_trading_hours  # noqa: E402
 from core.early_signal import (build_signals, prime_alerted,  # noqa: E402
                                vr_pct, zt_shape_of)
 from core.heat import HOT_THRESHOLD, sw_aggregate, theme_heat  # noqa: E402
 from core.momentum import window_diff  # noqa: E402
 from core.prob import stock_prob  # noqa: E402
+from core import theme_kb  # noqa: E402  # 题材知识库匹配(影子/展示, 不接买卖)
 from core.seesaw import SeesawTracker  # noqa: E402
+from core.theme_signal import (LEVELS, build_theme_signals,  # noqa: E402
+                               prev_ladder_of, scatter_evidence,
+                               signal_theme_of)
 from core.structure import build_struct_scores, fetch_ldlr_prev, v5_full  # noqa: E402
 from quotes.eastmoney import fetch_em_boards  # noqa: E402
 from quotes import fetch_quotes  # noqa: E402  # QUOTE_SOURCE分发: tx|qmt
@@ -54,6 +58,26 @@ def _fin(v, nd: int | None = None):
     if not math.isfinite(x):
         return None
     return round(x, nd) if nd is not None else x
+
+
+def _kb_mtime() -> float:
+    """KB 四表 + 剧本目录的最大 mtime(变更即重载, 否则用缓存)"""
+    from datastore import path_of
+    mt = 0.0
+    for n in ("theme.kb_theme", "theme.kb_stock",
+              "theme.kb_similarity", "theme.kb_signal"):
+        try:
+            p = path_of(n)
+            if p.exists():
+                mt = max(mt, p.stat().st_mtime)
+        except Exception:
+            pass
+    try:
+        if theme_kb.PLAYBOOK_DIR.exists():
+            mt = max(mt, theme_kb.PLAYBOOK_DIR.stat().st_mtime)
+    except Exception:
+        pass
+    return mt
 
 
 class Radar:
@@ -88,6 +112,7 @@ class Radar:
         self._ot_load_date: str = ""
         self._ipx_day: dict = {}      # code -> [[HHMMSS, price, vol, amt], ...] 全天分时
         self._ipx_date: str = ""
+        self._hold_cache: dict = {}   # sim持仓 state 文件 -> (mtime, ts_code集)
         self._auc: dict = {}          # 竞价快照(09:25~09:30首次达标即冻结)
         self._auc_date: str = ""
         self._sweep_src: str = ""     # 本轮实际取数源(qmt|tx), 竞价快照标源用
@@ -97,6 +122,14 @@ class Radar:
         self._sw_mt = None
         self._focus: dict = {}        # focus.json 专注板块集合(mtime守护)
         self._focus_mt = None
+        self._kb = None               # 题材知识库(theme_kb.load_kb, mtime守护)
+        self._kb_mt = None
+        self._kb_age: dict = {}       # {concept_code: theme_age} 持续性日龄(降级用)
+        self._kb_stage: dict = {}     # {concept_code: 题材阶段} 研究39 波次口径
+        self._kb_age_date: str = ""
+        self._t_ladder: dict = {}     # 昨日题材天梯(T级判定的静态锚, 每日一次)
+        self._t_ladder_date: str = ""
+        self._t_sig: dict = {}        # {concept_code: T级证据} 每cycle刷新
         self.seesaw: SeesawTracker | None = None  # 龙头拐头·跷跷板监测(跨日重建)
         self._seesaw_date: str = ""
         print(f"雷达初始化: {len(self.con2stock)}概念 {len(self.codes)}成分股")
@@ -181,10 +214,25 @@ class Radar:
         # 竞价量比, 与 stk_auction 同式。腾讯兜底的 vr 是接口 f[49] 现成
         # 量比, 与竞价口径未验证等价 → 一律置 None, 绝不用它冒充
         # (否则快照看着正常, 实则不可与官方对照, 比缺失更坏)
-        qmt_src = self._sweep_src == "qmt"
-        vrp = vr_pct(quotes, self.AUC_DOMAIN_PCT) if qmt_src else {}
+        # 竞价量拉取兜底(20260907定位): 推送是增量流, 订阅晚于 09:25:00~04
+        # 的竞价撮合 tick 波就采不到竞价量(09:25~09:30 静默期无增量,
+        # 实测12s仅13条) → sweep 兜底腾讯源 → vr 全 None 使闸失效。
+        # 拉取式 get_full_tick 一次拿全市场(~4s), 不受订阅时机影响。
+        pull = {}
+        if QUOTE_SOURCE == "qmt":
+            try:
+                from quotes.qmt import fetch_auction_pull
+                pull = fetch_auction_pull()
+            except Exception as e:
+                print(f"[{now:%H:%M:%S}] 竞价拉取兜底失败: {e}")
+        if pull:      # 限定到雷达宇宙: 分位排名域与原口径保持一致
+            univ = set(self.codes)
+            pull = {c: r for c, r in pull.items() if c in univ}
+        qmt_src = self._sweep_src == "qmt" or bool(pull)
+        base = pull if pull else (quotes if qmt_src else {})
+        vrp = vr_pct(base, self.AUC_DOMAIN_PCT) if base else {}
         snap = {}
-        for c, q in quotes.items():
+        for c, q in (pull if pull else quotes).items():
             if "ST" in q["name"] or c.endswith(".BJ"):
                 continue
             gap = _fin(q.get("pct"), 2)
@@ -205,7 +253,9 @@ class Radar:
                       and n_vr >= self.AUC_VR_COVER * len(snap)))
         self._auc = {"date": today_s,
                      "captured_at": now.strftime("%H:%M:%S"),
-                     "src": self._sweep_src or QUOTE_SOURCE, "frozen": freeze,
+                     "src": ("qmt_pull" if pull
+                             else (self._sweep_src or QUOTE_SOURCE)),
+                     "frozen": freeze,
                      "n": len(snap), "n_vr": n_vr, "stocks": snap,
                      "official": self._auc.get("official")}
         try:
@@ -293,6 +343,9 @@ class Radar:
             hh = self._heat_hist.setdefault(r["concept_code"],
                                             deque(maxlen=48))
             hh.append((t, r["heat"]))
+        # 题材级信号 T1/T2/T3(core/theme_signal.py): 锚定昨日天梯+盘中实时封板数
+        self._t_sig = build_theme_signals(self.con2stock, quotes,
+                                          self._t_ladder_of(today_s0))
         # 龙头拐头·跷跷板监测(core/seesaw.py): 龙头下跌→跟跌+对手板块,
         # 多定义并行打点供研究25选优, 事件流落盘seesaw_YYYYMMDD.jsonl
         if self._seesaw_date != today_s0:
@@ -356,7 +409,7 @@ class Radar:
             for c in mem[:5]:
                 q = quotes[c]
                 s = prob_by.get(c)
-                tops.append({"name": q["name"],
+                tops.append({"code": c, "name": q["name"],
                              "pct": round(q["pct"], 2),
                              "prob": s["prob"] if s else None,
                              "near": bool(s and s["near"])})
@@ -403,6 +456,12 @@ class Radar:
                         d.setdefault("pt", None)
                         d.setdefault("touch_t", None)
                         d.setdefault("zb_cnt", 0)
+                        # 回载的信号也要标 t_src=live: 它们同样是盘中产出,
+                        # 只是写盘时早于 t_src 字段上线。不补则看板误报
+                        # 「无T级(早于T级上线)」。已有 offline_backfill 的
+                        # 不覆盖(那是 T+1 官方回填, 语义不同)。
+                        if d.get("t_sig") and not d.get("t_src"):
+                            d["t_src"] = "live"
                         self._presig_day[key] = d
                     print(f"[{now:%H:%M:%S}] 预警信号回载 "
                           f"{len(self._presig_day)}条")
@@ -453,6 +512,20 @@ class Radar:
                     # 来源标记: 盘中快照。与 T+1 官方回填区分, 研究侧可按
                     # auc_src!='live' 排除(Forward Return 方法论要求)
                     s["auc_src"] = "live"
+                # 题材级信号 T1/T2/T3 影子字段(研究34/35): 只展示不拦截。
+                # 不属于任何昨日活跃题材的记散票 T1(研究34: 封板率3.4%)
+                tev = signal_theme_of(self.stock2con, self._t_sig,
+                                      s["ts_code"]) or scatter_evidence()
+                s["t_sig"] = self._t_brief(tev)
+                # t_src 必须显式标 "live" —— 只有 backfill_tsig.py 会写
+                # "offline_backfill", 雷达不写则看板无法区分盘中实时与
+                # T+1 回填, 会误报「无T级(早于T级上线)」。
+                s["t_src"] = "live"
+                # 申万一级/二级(供已封板/未封板表的「板块列」点击看 top5)
+                msw = self._sw_map.get(s["ts_code"])
+                if msw:
+                    s["sw_l1"] = msw.get("l1")
+                    s["sw_l2"] = msw.get("l2")
             self._presig_day[key] = s
         # 已封板信号票: 补涨停形态与模型归属(封板后不变, 只算一次;
         # “未知/未细分”类允许在轨迹回载后重算升级)
@@ -478,6 +551,11 @@ class Radar:
             if q:
                 self._last_px[s["ts_code"]] = q["price"]
                 px_last = q["price"]
+            if px_last is not None:
+                # 现价(供看板算「买入涨幅%」=现价较推荐买价 pb 的浮盈)。
+                # 推送静默票用 _last_px 兜底。注意信号 pct 是触发时刻值
+                # (冻结, 不随盘更新), 故「买入涨幅%」独立于「涨幅」列。
+                s["px"] = _fin(px_last, 2)
             if q:
                 self._presig_px.setdefault(key, []).append(
                     [ts_str, q["price"], q.get("volume", 0),
@@ -530,7 +608,39 @@ class Radar:
                       f"{s['name']} {s['pct']}% [{s['why']}] "
                       f"r3={s['r3']} pv={s['pathvol']}")
         self.cycle += 1
-        focus_snap = self._build_focus(sw, themes, presig_all)
+        # 盘面 S/T 标注: 给概率榜与题材领涨成分都挂上个股级S与题材级T。
+        # 放在 presig 累积之后, 保证 S 级是本轮最新状态而非滞后一轮
+        s_by: dict = {}
+        for (c, stg) in self._presig_day:
+            s_by.setdefault(c, []).append(stg)
+        # 概率榜条目带上 struct(结构闸) 与 y_lb(昨日连板), 供看板
+        # 「方案·T级」列算 B2/C1/C5(这两个方案需要闸与昨板高度)。
+        # 从同 code 的 presig 信号取; 非信号票无 struct, 只能算到 B1。
+        sig_by_code = {s["ts_code"]: s for s in self._presig_day.values()}
+        for row in stocks_all:
+            tev = signal_theme_of(self.stock2con, self._t_sig,
+                                  row["ts_code"]) or scatter_evidence()
+            row["t_sig"] = self._t_brief(tev)
+            row["s_stage"] = ",".join(sorted(s_by.get(row["ts_code"], []))) \
+                or None
+            # 申万一级/二级(供盘面「板块列」点击看 top5 分时叠加)
+            m = self._sw_map.get(row["ts_code"])
+            if m:
+                row["sw_l1"] = m.get("l1")
+                row["sw_l2"] = m.get("l2")
+            sg = sig_by_code.get(row["ts_code"])
+            if sg:
+                row["struct"] = sg.get("struct")
+                row["y_lb"] = sg.get("y_lb")
+        for r in themes[:40]:
+            for x in (r.get("top") or []):
+                tev = signal_theme_of(self.stock2con, self._t_sig,
+                                      x["code"]) or scatter_evidence()
+                x["t_sig"] = self._t_brief(tev)
+                x["s_stage"] = ",".join(sorted(s_by.get(x["code"], []))) \
+                    or None
+        focus_snap = self._build_focus(sw, themes, presig_all, quotes)
+        kb_snap = self._kb_snapshot(themes, today_s)
         snap = {"ts": now.strftime("%H:%M:%S"), "trading": True,
                 "interval": INTERVAL, "themes": themes[:40],
                 "external": external, "near_cnt": near_cnt,
@@ -539,6 +649,7 @@ class Radar:
                 "sw": sw,
                 "sw_traj": self._sw_traj,
                 "focus": focus_snap,
+                "kb_response": kb_snap,
                 "presignals": presig_all[:80],
                 "stocks": [s for s in stocks_all
                            if not s["near"] and s["prob"] >= 0.05][:80]}
@@ -588,6 +699,19 @@ class Radar:
             if not tr or tr[-1][0] != hm_s:
                 tr.append([hm_s, q["price"], q.get("volume", 0),
                            q.get("amount", 0)])
+        # 分时扩围: sim 持仓股无条件记录现价。修复继承持仓若当日无涨停
+        # 异动会被上面门槛(pct≥1%或prob≥0.2)滤掉 → sim 侧 current_snapshot
+        # 取不到价格点、现价回退昨收 → 盈亏/净值失真(实测: 003032 昨买
+        # 今跌4.3%不在快照, 看板误显示 pnl=0)。持仓股少(数只), 每轮读
+        # state(mtime 缓存)开销可忽略。
+        for c in self._sim_holdings():
+            q = quotes.get(c)
+            if not q or q.get("price", 0) <= 0:
+                continue
+            tr = self._ipx_day.setdefault(c, [])
+            if not tr or tr[-1][0] != hm_s:
+                tr.append([hm_s, q["price"], q.get("volume", 0),
+                           q.get("amount", 0)])
         # ~5min 周期落盘; 15:00后每轮强制落盘(收盘尾段不因进程
         # 非优雅退出丢失, 实测某日只落到14:56, 尾段全丢)
         if self.cycle % 15 == 0 or now.strftime("%H%M") >= "1500":
@@ -617,13 +741,118 @@ class Radar:
               f"耗时{time.time() - t:.1f}s")
         return time.time() - t
 
-    def _build_focus(self, sw: list, themes: list, presig_all: list):
+    def _sim_holdings(self) -> set:
+        """sim 各主模拟(__main)当日持仓股 ts_code 集合(mtime 守护缓存)。
+
+        为何需要: 盘中分时(_ipx_day)门槛只记涨停/涨≥1%/高概率票, 继承
+        持仓若当日无涨停异动会被滤掉 → sim 侧 current_snapshot 取不到
+        价格点、现价回退昨收 → 盈亏/净值失真。故持仓股无条件纳入采集。
+        读 data/sim/runs/*__main/state/{today}.json 的 positions。"""
+        runs = DATA / "sim" / "runs"
+        if not runs.exists():
+            return set()
+        today_s = datetime.now().strftime("%Y%m%d")
+        codes = set()
+        for sf in runs.glob(f"*__main/state/{today_s}.json"):
+            try:
+                mt = sf.stat().st_mtime
+                hit = self._hold_cache.get(str(sf))
+                if hit and hit[0] == mt:
+                    codes |= hit[1]
+                    continue
+                d = json.loads(sf.read_text(encoding="utf-8"))
+                cs = {(p.get("ts_code") or p.get("code"))
+                      for p in (d.get("positions") or [])
+                      if float(p.get("qty") or p.get("quantity") or 0) > 0}
+                cs.discard(None)
+                self._hold_cache[str(sf)] = (mt, cs)
+                codes |= cs
+            except Exception:
+                continue
+        return codes
+
+    @staticmethod
+    def _t_brief(tev: dict) -> dict:
+        """T级证据压缩成盘面标注用的精简字段(完整证据不入 radar.json)"""
+        return {"level": tev["level"], "theme": tev["name"],
+                "zt_live": tev["n_sealed"], "y_ht": tev["y_ht"],
+                "ld_name": tev["ld_name"], "ld_gap": _fin(tev["ld_gap"], 2),
+                "neg_fb": tev["neg_fb"], "why": tev["why"]}
+
+    def _t_ladder_of(self, today_s: str) -> dict:
+        """昨日题材天梯(每日一次加载, T级判定的静态锚)。
+
+        取严格早于今日的最后一个交易日——**不能用当日 theme.day**, 当日
+        龙头是从当日涨停股里选出的, 盘中无法知道今天谁是龙一(研究34
+        的前视教训)。加载失败降级为空字典 → 全部信号记散票 T3。"""
+        if self._t_ladder_date != today_s:
+            self._t_ladder_date = today_s
+            self._t_ladder = {}
+            try:
+                from datastore import load as _ds_load
+                td = _ds_load("theme.day",
+                              columns=["trade_date", "concept_code",
+                                       "concept_name", "leader_code",
+                                       "leader_name", "leader_height",
+                                       "max_height", "zt_cnt", "theme_age"])
+                prev = max((d for d in td["trade_date"].unique()
+                            if d < today_s), default=None)
+                if prev:
+                    self._t_ladder = prev_ladder_of(
+                        td[td["trade_date"] == prev])
+                    print(f"题材级信号: 昨日天梯 {prev} "
+                          f"{len(self._t_ladder)}个题材")
+                else:
+                    print("题材级信号: 无昨日天梯(首日或数据缺失), 全记散票")
+            except Exception as e:
+                print(f"题材级信号: 昨日天梯加载失败 {e}")
+                self._t_ladder = {}
+        return self._t_ladder
+
+    def _tsig_auto(self, quotes: dict, presig_all: list, topn: int = 5):
+        """自动题材级信号面板: T3/T2 题材 + 题材内 pct 最高的 N 只。
+
+        T1 不进面板(数量太多且是最弱档标记), 只在个股行的影子里体现。
+        数字越大越好 → T3 排在前。每只附 s_stage 标注它已在哪个 S 级
+        观察名单里(与 S1 联动)。"""
+        rows = [v for v in self._t_sig.values() if v["level"] in ("T3", "T2")]
+        if not rows:
+            return None
+        rows.sort(key=lambda v: (-LEVELS.index(v["level"]), -v["n_sealed"]))
+        sig_by: dict = {}
+        for s in presig_all:
+            sig_by.setdefault(s["ts_code"], []).append(s["stage"])
+        out = []
+        for v in rows[:12]:
+            mem = sorted((c for c in self.con2stock.get(v["concept_code"], [])
+                          if c in quotes and "ST" not in quotes[c]["name"]
+                          and quotes[c]["limit_px"] > 0),
+                         key=lambda c: -quotes[c]["pct"])
+            out.append({
+                "level": v["level"], "concept_code": v["concept_code"],
+                "name": v["name"], "why": v["why"],
+                "n_sealed": v["n_sealed"], "y_ht": v["y_ht"],
+                "y_zt": v["y_zt"], "y_age": v["y_age"],
+                "ld_name": v["ld_name"], "ld_ht": v["ld_ht"],
+                "ld_gap": _fin(v["ld_gap"], 2),
+                "top": [{"code": c, "name": quotes[c]["name"],
+                         "pct": round(quotes[c]["pct"], 2),
+                         "sealed": c in v["sealed_codes"],
+                         "sig": ",".join(sig_by.get(c, [])) or None}
+                        for c in mem[:topn]]})
+        return out
+
+    def _build_focus(self, sw: list, themes: list, presig_all: list,
+                     quotes: dict):
         """专注面板数据: focused申万聚合 + focused概念热度 + 属于focus的
-        S2/S3信号。focus为空返回None(前端不渲染面板)。
+        S2/S3信号 + **自动 T1/T2 题材**(不依赖手动专注)。
+        手动 focus 为空但有自动题材时仍返回(前端渲染自动推荐区)。
         信号归属: 申万靠sw_map反查L1/L2, 概念靠stock2con求交集。"""
         items = (self._focus or {}).get("items", [])
+        auto = self._tsig_auto(quotes, presig_all)
         if not items:
-            return None
+            return ({"items": [], "sw": [], "concepts": [], "signals": [],
+                     "auto": auto} if auto else None)
         f_l1 = {it["name"] for it in items if it.get("type") == "sw_l1"}
         f_l2 = {it["name"] for it in items if it.get("type") == "sw_l2"}
         f_con = {it["name"] for it in items if it.get("type") == "concept"}
@@ -652,42 +881,144 @@ class Radar:
             if in_sw or in_con:
                 fsig.append(s)
         return {"items": items, "sw": fsw, "concepts": fcon,
-                "signals": fsig[:40]}
+                "signals": fsig[:40], "auto": auto}
+
+    def _kb_snapshot(self, themes: list, today_s: str):
+        """题材知识库匹配快照(影子/展示, 不接买卖拦截)。
+
+        对当前热点题材检索历史剧本, 给出阶段+龙头候选+退潮/切换
+        信号+证伪条款。KB 未建/无命中返回 None(前端不渲染)。剧本正文
+        不入 radar.json(太大), 只给 playbook_ref, 全文由服务端按 ref 读取。
+        波龄每日一次从 theme.day 取(缺失降级为空, 阶段判定退化用热度)。"""
+        mt = _kb_mtime()
+        if self._kb is None or self._kb_mt != mt:
+            self._kb_mt = mt
+            try:
+                self._kb = theme_kb.load_kb()
+            except Exception:
+                self._kb = None
+        if not self._kb or self._kb["theme"].empty:
+            return None
+        if self._kb_age_date != today_s:
+            self._kb_age_date = today_s
+            self._kb_age = {}
+            self._kb_stage = {}
+            try:
+                from datastore import load as _ds_load
+                from core.cycle import theme_stage as _theme_stage
+                td = _ds_load("theme.day", columns=["trade_date",
+                                                    "concept_code", "theme_age",
+                                                    "zt_all", "wave_no"])
+                day = td[td["trade_date"] == td["trade_date"].max()]
+                self._kb_age = {r["concept_code"]: int(r["theme_age"] or 0)
+                                for _, r in day.iterrows()}
+                # 题材阶段(研究39 定稿): 波次驱动, 不用日龄
+                self._kb_stage = {
+                    r["concept_code"]: _theme_stage(
+                        int(r.get("wave_no") or 0) or None,
+                        int(r.get("zt_all") or 0))
+                    for _, r in day.iterrows()}
+            except Exception:
+                self._kb_age = {}
+                self._kb_stage = {}
+        matched = theme_kb.match(themes[:40], self._kb, age_by=self._kb_age,
+                                 stage_by=self._kb_stage)
+        if not matched:
+            return None
+        out = []
+        for m in matched:
+            resp = m.get("response") or {}
+            out.append({
+                "concept_code": m.get("concept_code"), "name": m.get("name"),
+                "heat": _fin(m.get("heat"), 2), "zt": m.get("zt"),
+                "stage": m.get("stage"), "match_way": m.get("match_way"),
+                "match_score": _fin(m.get("match_score"), 3),
+                "matched_theme": m.get("matched_theme"),
+                "driver_type": resp.get("driver_type"),
+                "playbook_ref": resp.get("playbook_ref"),
+                "first_catalyst": resp.get("first_catalyst"),
+                "catalyst_conf": resp.get("catalyst_conf"),
+                "env_precondition": resp.get("env_precondition"),
+                "falsification": resp.get("falsification"),
+                "leaders": [{"name": l.get("name"), "role": l.get("role"),
+                             "chain_node": l.get("chain_node"),
+                             "benefit_purity": _fin(l.get("benefit_purity"), 2)}
+                            for l in (resp.get("leaders") or [])],
+                "signals": [{"phase": s.get("phase"), "signal": s.get("signal"),
+                             "type": s.get("type"),
+                             "confidence": s.get("confidence")}
+                            for s in (resp.get("signals") or [])],
+                "similar": [{"name": s.get("name"),
+                             "sim_score": _fin(s.get("sim_score"), 3)}
+                            for s in (m.get("similar") or [])],
+            })
+        return out
 
     def flush_state(self):
-        """内存状态强制落盘(优雅退出/崩溃前调用)"""
-        today_s = datetime.now().strftime("%Y%m%d")
+        """内存状态强制落盘(优雅退出/崩溃前调用)
+
+        日期必须用各状态**自己的归属日**, 不能用 datetime.now():
+        雷达跨日驻留时(例如周四收盘后一直跑到周一才被 kill), 内存里是
+        上周的信号, 用 now() 会把陈旧信号倒进今天的文件 —— 实测
+        presig_state_20260907.json 被灌入了 4179 条 0904 的信号。
+        各状态日期字段为空(从未跑过 cycle)时才回退 now()。"""
+        now_s = datetime.now().strftime("%Y%m%d")
+        d_ps = self._presig_date or now_s
+        d_ipx = self._ipx_date or now_s
+        d_ot = self._ot_load_date or now_s
+        d_ss = self._seesaw_date or now_s
+        d_sw = self._sw_traj_date or now_s
         try:
             if self._open_traj:
-                (LIVE / f"open_traj_{today_s}.json").write_text(
+                (LIVE / f"open_traj_{d_ot}.json").write_text(
                     json.dumps(self._open_traj), encoding="utf-8")
-            state = {"date": today_s, "signals": []}
+            state = {"date": d_ps, "signals": []}
             for key, s in self._presig_day.items():
                 d = dict(s)
                 d["px_hist"] = self._presig_px.get(key, [])
                 state["signals"].append(d)
             if state["signals"]:
-                (LIVE / f"presig_state_{today_s}.json").write_text(
+                (LIVE / f"presig_state_{d_ps}.json").write_text(
                     json.dumps(state, ensure_ascii=False), encoding="utf-8")
             if self._ipx_day:
-                (LIVE / f"intraday_px_{today_s}.json").write_text(
+                (LIVE / f"intraday_px_{d_ipx}.json").write_text(
                     json.dumps(self._ipx_day), encoding="utf-8")
             if self.seesaw and self.seesaw.con_day:
-                (LIVE / f"concept_px_{today_s}.json").write_text(
+                (LIVE / f"concept_px_{d_ss}.json").write_text(
                     json.dumps(self.seesaw.con_day), encoding="utf-8")
             if self._sw_traj:
-                (LIVE / f"sw_traj_{today_s}.json").write_text(
+                (LIVE / f"sw_traj_{d_sw}.json").write_text(
                     json.dumps(self._sw_traj), encoding="utf-8")
-            print(f"内存状态落盘完成: 信号{len(state['signals'])}条 "
+            print(f"内存状态落盘完成(归属日 presig={d_ps} ipx={d_ipx}): "
+                  f"信号{len(state['signals'])}条 "
                   f"开盘轨迹{len(self._open_traj)}只 "
                   f"分时{len(self._ipx_day)}只")
         except Exception as e:
             print(f"内存状态落盘失败: {e}")
 
+    def _warm_push(self):
+        """竞价预热: qmt 源时提前建推送订阅(09:15~09:25 预热段反复调用,
+        内部幂等)。订阅必须早于 09:25:00~04 的全市场竞价撮合 tick 波,
+        否则竞价量永久采不到(推送是增量流)。"""
+        if QUOTE_SOURCE != "qmt":
+            return
+        try:
+            from quotes.qmt import warm_push
+            warm_push()
+        except Exception as e:
+            print(f"[{datetime.now():%H:%M:%S}] 竞价预热失败: {e}")
+
     def run(self):
         while True:
-            if not is_trading_hours(datetime.now()):
+            now = datetime.now()
+            if not is_radar_hours(now):
                 time.sleep(120)
+                continue
+            if not is_trading_hours(now):
+                # 09:15~09:25 竞价预热段: 只建推送订阅, 不产信号
+                # (避免把竞价指示价当成交价产伪 S1/S2)
+                self._warm_push()
+                time.sleep(15)
                 continue
             elapsed = self.once()
             time.sleep(max(1.0, INTERVAL * min(4, 2 ** self.bad_sweep)

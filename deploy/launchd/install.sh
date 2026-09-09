@@ -2,11 +2,13 @@
 # macOS launchd 盘前自启安装器（模板渲染 + 加载, 零硬编码路径）
 #
 # 用法:
-#   bash deploy/launchd/install.sh                 # 安装并加载（默认 install）
+#   bash deploy/launchd/install.sh                 # 安装盘前自启(start.sh)
 #   bash deploy/launchd/install.sh install --at 09:05
+#   bash deploy/launchd/install.sh --job probe     # 安装竞价 tick 勘探
 #   bash deploy/launchd/install.sh status          # 查看安装状态
 #   bash deploy/launchd/install.sh run-now         # 立即触发一次（验证幂等）
 #   bash deploy/launchd/install.sh uninstall       # 卸载并移除 plist
+#   上述子命令均可加 --job start|probe 指定目标(默认 start)
 #
 # 配置优先级（与 config.py._load_dotenv 的 setdefault 语义一致）:
 #   命令行 --at/--label > 已导出的 shell 环境变量 > 项目 .env > 内置默认值
@@ -15,15 +17,21 @@
 #   AUTOSTART_AT     盘前启动时刻 HH:MM, 默认 09:10
 #   AUTOSTART_LABEL  launchd 任务名, 默认 com.ticai-daban.morning
 #                    （改名可并存多份安装, 例如区分不同项目副本）
+#   PROBE_AT         竞价勘探触发时刻 HH:MM, 默认 09:14
+#   PROBE_LABEL      默认 com.ticai-daban.auctionprobe
+#
+# 两个任务为何分开: 竞价探针必须早于 09:15 启动且与雷达共用同一 QMT
+# account_id(订阅按账号排队), 故采集窗口在 09:25:20 结束以压低重叠。
 set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-TEMPLATE="$HERE/com.ticai-daban.morning.plist.template"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 DEFAULT_AT="09:10"
 DEFAULT_LABEL="com.ticai-daban.morning"
+PROBE_DEFAULT_AT="09:14"
+PROBE_DEFAULT_LABEL="com.ticai-daban.auctionprobe"
 
 # ---------- 配置读取 ----------
 # .env 取值: 忽略注释与空行, 容忍行内注释与引号（同 config.py._load_dotenv）
@@ -52,11 +60,13 @@ cfg_get() {
 CMD="install"
 AT=""
 LABEL=""
+JOB="start"
 while [ $# -gt 0 ]; do
   case "$1" in
     install|uninstall|status|run-now) CMD="$1" ;;
     --at)    AT="$2"; shift ;;
     --label) LABEL="$2"; shift ;;
+    --job)   JOB="$2"; shift ;;
     -h|--help)
       # 只打印文件头连续注释块(遇第一行非注释即停), 不随注释长度漂移
       awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
@@ -66,8 +76,20 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-AT="${AT:-$(cfg_get AUTOSTART_AT "$DEFAULT_AT")}"
-LABEL="${LABEL:-$(cfg_get AUTOSTART_LABEL "$DEFAULT_LABEL")}"
+case "$JOB" in
+  start) TEMPLATE="$HERE/com.ticai-daban.morning.plist.template"
+         DEF_AT="$DEFAULT_AT"; DEF_LABEL="$DEFAULT_LABEL"
+         ENV_AT="AUTOSTART_AT"; ENV_LABEL="AUTOSTART_LABEL"
+         TARGET="start.sh"; LOG="logs/launchd.log" ;;
+  probe) TEMPLATE="$HERE/com.ticai-daban.auctionprobe.plist.template"
+         DEF_AT="$PROBE_DEFAULT_AT"; DEF_LABEL="$PROBE_DEFAULT_LABEL"
+         ENV_AT="PROBE_AT"; ENV_LABEL="PROBE_LABEL"
+         TARGET="collect/probe_auction.py"; LOG="logs/auction_probe.log" ;;
+  *) echo "--job 只支持 start|probe, 收到 '$JOB'" >&2; exit 1 ;;
+esac
+
+AT="${AT:-$(cfg_get "$ENV_AT" "$DEF_AT")}"
+LABEL="${LABEL:-$(cfg_get "$ENV_LABEL" "$DEF_LABEL")}"
 
 if ! echo "$AT" | grep -qE '^([01][0-9]|2[0-3]):[0-5][0-9]$'; then
   echo "启动时刻格式非法: '$AT'（应为 HH:MM, 例如 09:10）" >&2
@@ -85,6 +107,7 @@ PLIST="$AGENTS_DIR/$LABEL.plist"
 case "$CMD" in
   status)
     echo "项目目录 : $ROOT"
+    echo "任务     : $JOB → $TARGET"
     echo "任务名   : $LABEL"
     echo "启动时刻 : 工作日 $AT"
     echo "plist    : $PLIST $([ -f "$PLIST" ] && echo '(已安装)' || echo '(未安装)')"
@@ -101,7 +124,7 @@ case "$CMD" in
       exit 1
     fi
     launchctl start "$LABEL"
-    echo "已触发一次（start.sh 幂等, 存活进程会被跳过）; 日志: $ROOT/logs/launchd.log"
+    echo "已触发一次; 日志: $ROOT/$LOG"
     exit 0 ;;
 
   uninstall)
@@ -119,8 +142,8 @@ case "$CMD" in
       echo "模板缺失: $TEMPLATE" >&2
       exit 1
     fi
-    if [ ! -f "$ROOT/start.sh" ]; then
-      echo "未找到 $ROOT/start.sh — 本脚本必须放在项目内 deploy/launchd/ 下" >&2
+    if [ ! -f "$ROOT/$TARGET" ]; then
+      echo "未找到 $ROOT/$TARGET — 本脚本必须放在项目内 deploy/launchd/ 下" >&2
       exit 1
     fi
     mkdir -p "$AGENTS_DIR" "$ROOT/logs"
@@ -138,8 +161,8 @@ case "$CMD" in
     launchctl load "$PLIST"
     echo "已安装: $PLIST"
     echo "  项目目录 $ROOT"
-    echo "  工作日(周一~周五) $AT 触发 start.sh"
-    echo "  运行日志 $ROOT/logs/launchd.log"
-    echo "验证: bash deploy/launchd/install.sh run-now   查看: ... status"
+    echo "  工作日(周一~周五) $AT 触发 $TARGET"
+    echo "  运行日志 $ROOT/$LOG"
+    echo "验证: bash deploy/launchd/install.sh run-now --job $JOB   查看: ... status --job $JOB"
     exit 0 ;;
 esac

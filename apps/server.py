@@ -18,6 +18,10 @@ GET /api/run?id=&asof=  → run 详情(指标/曲线/交易/持仓/日志; live 
 POST /api/backtest/run  → 发起回测 {strategy,start,end,freq,capital}
 POST /api/sim/start     → 发起模拟 {strategy,seed_run?,capital?} seed_run=以某次回测为起点
 POST /api/sim/stop      → 关闭/取消 run {id}
+GET /api/ai_agent/stream(SSE) → 题材智能体分析过程实时事件流
+GET /api/ai_agent/state → 当前运行态快照(页面加载/断线重连)
+GET /api/ai_factor?date=→ 题材级因子(theme_factor feed, 默认今日)
+POST /api/ai_agent/analyze(SSE) → 手动点新闻即时分析(仅展示, 不落盘)
 
 启动: python apps/server.py [port]  默认8765
 """
@@ -26,6 +30,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from collections import defaultdict
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -37,9 +42,17 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from config import DATA  # noqa: E402
 from apps.review import build_review  # noqa: E402
+
+# 深挖任务串行锁(排队, 不顶替上一个) + 已分析新闻标题去重集合
+_DIG_LOCK = threading.Lock()
+_DIG_DONE: set = set()
 from core.longtou import QSCORE_NEXT_WIN, SSCORE_SEAL, env_status  # noqa: E402
 from datastore import load, path_of  # noqa: E402
 from core.heat import sw_aggregate  # noqa: E402
+from rqalpha_mod_ticai import feeds  # noqa: E402
+from core import llm, newsfeed  # noqa: E402
+from core import theme_kb  # noqa: E402  # 题材知识库(剧本全文/档案按 ref 取)
+from apps.ai_feed import _llm_config, save_llm_config  # noqa: E402
 
 WEB = ROOT / "web"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
@@ -263,8 +276,15 @@ def _tx_minute(date: str, code: str):
     try:
         with urllib.request.urlopen(url, timeout=3) as r:
             j = json.loads(r.read().decode("utf-8"))
-        raw = j["data"][sym]["data"]["data"]
+        node = j["data"][sym]["data"]
+        raw = node["data"]
     except Exception:
+        return None
+    # 盘前/非交易时段该接口返回上一交易日的全天分时, date 字段标识
+    # 数据所属日; 与请求日不符则整段丢弃, 避免把昨日曲线当作今日
+    # "尚未发生"的时段画进分时图(盘中出现未来时段曲线的根因)。
+    tx_date = node.get("date")
+    if tx_date and str(tx_date) != str(date):
         return None
     # qt 快照顺带提取昨收(qt[4]): 分时图涨跌幅/涨跌停线基准
     try:
@@ -642,10 +662,16 @@ def _build_intraday(code: str, date: str) -> dict:
 
     # 时段过滤: 非连续竞价时段的点剔除(盘后手动补跑雷达会追加
     # 收盘后的重复平台点, 污染"最新价/最新时刻"与图形右端)
-    pts = [[t] + v for t, v in sorted(m.items())
-           if "09:15:00" <= t <= "15:00:59"]
     from datetime import datetime as _dt
-    is_today = date == _dt.now().strftime("%Y%m%d")
+    now_dt = _dt.now()
+    is_today = date == now_dt.strftime("%Y%m%d")
+    # 盘中截断: 当日且未收盘(now<15:00)时只保留 <= 当前时刻的点,
+    # 杜绝把尚未发生的时段(含误入的昨日全天数据)画进分时图。
+    now_hms = now_dt.strftime("%H:%M:%S")
+    cutoff = now_hms if (is_today and now_hms < "15:00:00") else None
+    pts = [[t] + v for t, v in sorted(m.items())
+           if "09:15:00" <= t <= "15:00:59"
+           and (cutoff is None or t <= cutoff)]
     vols: list = []
     vwap: list = []
     if is_today:
@@ -658,6 +684,12 @@ def _build_intraday(code: str, date: str) -> dict:
     else:
         pts = _clean_series(pts)
         vols, vwap = _m1_day_vols(date, code)
+    # 腾讯补缺/合并可能带入 > cutoff 的分钟点, 统一按当前时刻再截断
+    # (vols 为 HH:MM, vwap 为 HH:MM:SS, 分别与 cutoff 对齐比较)
+    if cutoff is not None:
+        pts = [p for p in pts if p[0] <= cutoff]
+        vols = [v for v in vols if v[0] <= cutoff[:5]]
+        vwap = [v for v in vwap if v[0] <= cutoff]
     # 昨收(涨跌幅/涨跌停基准): 当日腾讯快照qt > m1前一交易日收盘 > log配对
     pc = None
     if is_today:
@@ -1212,6 +1244,342 @@ def _spawn_run(run_id: str, extra: list) -> dict:
     return {"run_id": run_id, "pid": p.pid}
 
 
+# ---------- AI 线索 / 数据源订阅 ----------
+
+def _aiclues_payload(date: str | None) -> dict:
+    """合并 llm_clue + clue_rule 两 feed 的当日线索(展示用, 不加 cutoff 闸门)"""
+    from datetime import datetime as _dt
+    date = date or _dt.now().strftime("%Y%m%d")
+    entries = []
+    for name in ("llm_clue", "clue_rule"):
+        for e in feeds.read_feed(name, date):
+            d = dict(e)
+            d["feed"] = name
+            entries.append(d)
+    entries.sort(key=lambda e: e.get("ts", 0), reverse=True)
+    return {"date": date, "entries": entries}
+
+
+_BULL_IMPS = ("严重利好", "轻微利好", "间接利好")
+_BEAR_IMPS = ("严重利空", "轻微利空", "间接利空")
+
+
+def _net_sentiment(imps: dict) -> str:
+    """由影响档位计数算净情绪: 利好计 vs 利空计"""
+    bull = sum(v for k, v in imps.items() if k in _BULL_IMPS)
+    bear = sum(v for k, v in imps.items() if k in _BEAR_IMPS)
+    if bull > bear:
+        return "bullish"
+    if bear > bull:
+        return "bearish"
+    return "neutral"
+
+
+def _aiclue_index_payload(date: str | None) -> dict:
+    """把线索归并到板块/股票两个维度(只计 matched 的归一结果),
+    供看板「板块维度/股票维度」查询下钻。"""
+    base = _aiclues_payload(date)
+    sectors: dict = {}
+    stocks: dict = {}
+    for i, e in enumerate(base["entries"]):
+        x = e.get("extra") or {}
+        meta = {"i": i, "ts": e.get("ts"), "t": e.get("t"),
+                "topic": e.get("topic"), "grade": x.get("grade"),
+                "heat": x.get("heat"), "ctype": x.get("clue_type"),
+                "src": e.get("src"),
+                "source": (x.get("source")
+                           or ((x.get("sources") or [{}])[0].get("source")))}
+        m_sectors = [s for s in (x.get("sectors") or []) if s.get("matched")]
+        m_stocks = [s for s in (x.get("stocks") or []) if s.get("code")]
+        for s in m_sectors:
+            g = sectors.setdefault(s["name"], {"name": s["name"], "clues": [],
+                                              "imps": {}, "stocks": {},
+                                              "heat_max": 0, "latest": 0})
+            g["clues"].append(dict(meta, impact=s.get("impact")))
+            k = s.get("impact") or "中性"
+            g["imps"][k] = g["imps"].get(k, 0) + 1
+            g["heat_max"] = max(g["heat_max"], x.get("heat") or 0)
+            g["latest"] = max(g["latest"], e.get("ts") or 0)
+            for st in m_stocks:
+                sg = g["stocks"].setdefault(st["code"], {"code": st["code"],
+                                                         "name": st.get("name"),
+                                                         "n": 0})
+                sg["n"] += 1
+        for st in m_stocks:
+            g = stocks.setdefault(st["code"], {"code": st["code"],
+                                               "name": st.get("name"),
+                                               "clues": [], "imps": {},
+                                               "sectors": {}, "heat_max": 0,
+                                               "latest": 0})
+            g["clues"].append(dict(meta, impact=st.get("impact")))
+            k = st.get("impact") or "中性"
+            g["imps"][k] = g["imps"].get(k, 0) + 1
+            g["heat_max"] = max(g["heat_max"], x.get("heat") or 0)
+            g["latest"] = max(g["latest"], e.get("ts") or 0)
+            for s in m_sectors:
+                ssg = g["sectors"].setdefault(s["name"], {"name": s["name"],
+                                                          "n": 0})
+                ssg["n"] += 1
+    for g in sectors.values():
+        g["clues"].sort(key=lambda c: -(c.get("ts") or 0))
+        g["stocks"] = sorted(g["stocks"].values(), key=lambda v: -v["n"])
+        g["sentiment"] = _net_sentiment(g["imps"])
+        g["imps_list"] = sorted(g["imps"].items(), key=lambda kv: -kv[1])
+        g["clue_n"] = len(g["clues"])
+    for g in stocks.values():
+        g["clues"].sort(key=lambda c: -(c.get("ts") or 0))
+        g["sectors"] = sorted(g["sectors"].values(), key=lambda v: -v["n"])
+        g["sentiment"] = _net_sentiment(g["imps"])
+        g["imps_list"] = sorted(g["imps"].items(), key=lambda kv: -kv[1])
+        g["clue_n"] = len(g["clues"])
+    return {"date": base["date"],
+            "sectors": sorted(sectors.values(),
+                              key=lambda g: (-g["heat_max"], -g["clue_n"])),
+            "stocks": sorted(stocks.values(),
+                             key=lambda g: (-g["heat_max"], -g["clue_n"]))}
+
+
+def _aisources_payload() -> dict:
+    """数据源注册表 + LLM 可用状态 + 生产者配置 + 当日各源条数"""
+    from datetime import datetime as _dt
+    day = _dt.now().strftime("%Y%m%d")
+    sources = newsfeed.load_sources()
+    counts = {s["id"]: len(newsfeed.read_items(s["id"], day))
+              for s in sources}
+    return {"sources": sources,
+            "llm": {"available": llm.available(), "model": llm.model_name()},
+            "producers": _llm_config(),
+            "news_counts": counts}
+
+
+def _aiclue_dates_payload() -> dict:
+    """有 AI线索 feed(llm_clue/clue_rule)数据的日期列表(降序, 最新在前)。
+    供看板日期导航 —— 只在有线索的日期间跳转, 避免点出空页。"""
+    dates = set()
+    root = DATA / "sim" / "ai_feeds"
+    for name in ("llm_clue", "clue_rule"):
+        d = root / name
+        if d.exists():
+            for f in d.glob("*.json"):
+                s = f.stem
+                if len(s) == 8 and s.isdigit():
+                    dates.add(s)
+    return {"dates": sorted(dates, reverse=True)}
+
+
+def _playbook_payload(ref: str) -> dict:
+    """按 playbook_ref 取剧本全文 + 档案结构化(阶段轴/龙头候选/信号/相似题材)。
+
+    供看板点击 kb_response 展开剧本详情。ref 不存在返回 {error}。
+    只读, 不接买卖。"""
+    kb = theme_kb.load_kb()
+    th = kb["theme"]
+    row = None
+    if not th.empty:
+        hit = th[th["playbook_ref"] == ref]
+        if len(hit):
+            row = hit.iloc[0]
+    md = theme_kb.load_playbook(ref)
+    if row is None and not md:
+        return {"error": f"playbook '{ref}' 不存在"}
+    theme = {}
+    code = None
+    if row is not None:
+        code = row.get("concept_code")
+        try:
+            axis = json.loads(row.get("stage_axis") or "[]")
+        except Exception:
+            axis = []
+        theme = {"concept_code": code, "name": row.get("name"),
+                 "driver_type": row.get("driver_type"),
+                 "parent_theme": row.get("parent_theme"),
+                 "first_catalyst": row.get("first_catalyst"),
+                 "catalyst_conf": row.get("catalyst_conf"),
+                 "env_precondition": row.get("env_precondition"),
+                 "falsification": row.get("falsification"),
+                 "stage_axis": axis}
+    leaders = []
+    stock = kb["stock"]
+    if code is not None and not stock.empty:
+        sub = stock[(stock["concept_code"] == code)
+                    & (stock["role"].isin(["龙头", "中军", "补涨"]))].copy()
+        sub["_p"] = sub["benefit_purity"].apply(lambda v: _num(v, 3) or 0)
+        for _, r in sub.sort_values("_p", ascending=False).head(12).iterrows():
+            leaders.append({"ts_code": r.get("ts_code"), "name": r.get("name"),
+                            "role": r.get("role"),
+                            "chain_node": r.get("chain_node"),
+                            "moat": r.get("moat"),
+                            "benefit_purity": _num(r.get("benefit_purity"), 3)})
+    signals = []
+    sig = kb["signal"]
+    if not sig.empty:
+        for _, r in sig[sig["playbook_ref"] == ref].iterrows():
+            signals.append({"phase": r.get("phase"), "signal": r.get("signal"),
+                            "type": r.get("type"),
+                            "confidence": r.get("confidence")})
+    similar = []
+    sim = kb["similarity"]
+    if code is not None and not sim.empty:
+        e = sim[(sim["a_code"] == code) | (sim["b_code"] == code)]
+        for _, r in e.iterrows():
+            similar.append({"name": (r.get("b_name") if r.get("a_code") == code
+                                     else r.get("a_name")),
+                            "sim_score": _num(r.get("sim_score"), 3),
+                            "sim_driver": r.get("sim_driver"),
+                            "sim_chain": r.get("sim_chain"),
+                            "sim_flow": r.get("sim_flow")})
+    return {"ref": ref, "markdown": md, "theme": theme,
+            "leaders": leaders, "signals": signals, "similar": similar}
+
+
+def _group_top(kind: str, name: str, date: str, n: int = 8) -> dict:
+    """概念/申万板块的观察名单(今日领涨 + 昨日涨停股 + 龙头/中军/断板票)
+
+    为何不只取当日涨幅 top: 昨日涨停股与龙头/中军/断板票才是题材梯队的
+    骨架, 只看当日涨幅会把已断板的龙头埋掉。故并列四类:
+      · 今日涨幅 top(当日动量)
+      · 昨日涨停股(昨日复盘 pool 中 theme==该概念者)
+      · 昨日龙头 + 中军(梯队顶端)
+      · 龙头断板票(风险位)
+    每只标注 tier(地位) / y_pct(昨日涨幅) / y_lb(昨日连板数)。
+
+    为何不用 radar.json 的 themes[].top: 它只有热度 top40 题材, 其余题材
+    点开会报「暂无领涨成分」。本接口从成分表直接取, 任意概念/板块都能查。
+
+    涨幅口径: 优先 daily_panel 当日 pct_chg(收盘权威, 历史日可用);
+    当日未收盘时回退 intraday_px 最新价 + 上一日 pre_close 反推。
+    kind: concept(按 concept_code 或题材名) | sw(按申万二级名)
+    """
+    import pandas as pd
+    names: dict = {}
+    fn = DATA / "meta" / "qmt_names.json"
+    if fn.exists():
+        names = json.loads(fn.read_text(encoding="utf-8")).get("data", {})
+    # ---- 成分股列表 ----
+    if kind == "concept":
+        from core.attribute import load_con2stock
+        c2s = load_con2stock()
+        codes = c2s.get(name) or []
+        if not codes:                      # 传的是题材名而非 code → 反查
+            from core.attribute import load_maps
+            _, _, cname = load_maps()
+            hit = [k for k, v in cname.items() if v == name]
+            codes = c2s.get(hit[0]) if hit else []
+        title = f"概念 {name}"
+    else:
+        fsw = DATA / "meta" / "sw_map.json"
+        sw_map = json.loads(fsw.read_text(encoding="utf-8")) \
+            if fsw.exists() else {}
+        codes = [c for c, m in sw_map.items() if m.get("l2") == name]
+        title = f"板块 {name}"
+    if not codes:
+        return {"title": title, "date": date, "items": [],
+                "error": "该分组无成分股"}
+    code_set = set(codes)
+    # ---- 当日涨幅 ----
+    p = path_of("market.daily_panel")
+    pct: dict = {}
+    prev_close: dict = {}
+    if p.exists():
+        dp = pd.read_parquet(p, filters=[("trade_date", "=", date)],
+                             columns=["ts_code", "pct_chg", "pre_close"])
+        pct = {r.ts_code: r.pct_chg for r in dp.itertuples()
+               if pd.notna(r.pct_chg)}
+    if not pct:                            # 当日未收盘 → 分时最新价反推
+        f = DATA / "live" / f"intraday_px_{date}.json"
+        if f.exists():
+            ipx = json.loads(f.read_text(encoding="utf-8"))
+            dp = pd.read_parquet(p, columns=["ts_code", "pre_close",
+                                             "trade_date"]) \
+                if p.exists() else pd.DataFrame()
+            if len(dp):
+                prev = max((d for d in dp["trade_date"].unique() if d < date),
+                           default=None)
+                if prev:
+                    prev_close = {r.ts_code: r.pre_close
+                                  for r in dp[dp["trade_date"] == prev]
+                                  .itertuples() if pd.notna(r.pre_close)}
+            for c, pts in ipx.items():
+                if c not in code_set or not pts:
+                    continue
+                last = next((e[1] for e in reversed(pts)
+                             if len(e) >= 2 and e[1] and e[1] > 0), None)
+                if last and prev_close.get(c):
+                    pct[c] = (last / prev_close[c] - 1) * 100
+    # ---- 昨日梯队信息(复盘快照) ----
+    dates_all = sorted(d for d in
+                       (x.stem.replace("review_", "")
+                        for x in (DATA / "review").glob("review_*.json"))
+                       if d.isdigit() and len(d) == 8)
+    prev_d = max((d for d in dates_all if d < date), default=None)
+    y_theme, y_pool, y_sb, y_leader, y_zj = None, [], [], None, None
+    y_pct: dict = {}
+    y_lb: dict = {}
+    if prev_d:
+        fr = DATA / "review" / f"review_{prev_d}.json"
+        if fr.exists():
+            rv = json.loads(fr.read_text(encoding="utf-8"))
+            y_theme = next((t for t in rv.get("themes", [])
+                            if t.get("name") == name), None)
+            if y_theme:
+                y_leader = {"name": y_theme.get("leader_name"),
+                            "height": y_theme.get("leader_height")}
+                y_zj = y_theme.get("zhongjun")
+                y_sb = y_theme.get("shortboard_leaders") or []
+                y_pool = [x for x in rv.get("pool", [])
+                          if name in ([x.get("theme")]
+                                      + (x.get("themes") or []))]
+        # 昨日涨幅/连板数(日线面板 + 涨停事件)
+        if p.exists():
+            dp = pd.read_parquet(p, filters=[("trade_date", "=", prev_d)],
+                                 columns=["ts_code", "pct_chg"])
+            y_pct = {r.ts_code: r.pct_chg for r in dp.itertuples()
+                     if pd.notna(r.pct_chg)}
+        ev = load("limitup.events_enriched",
+                  columns=["trade_date", "ts_code", "limit_times"])
+        ev = ev[ev["trade_date"] == prev_d]
+        y_lb = {r.ts_code: int(r.limit_times or 1) for r in ev.itertuples()}
+    # ---- 合并观察名单: 梯队骨架优先, 再按当日涨幅补 ----
+    name2code = {v: k for k, v in names.items()}
+    tier: dict = {}
+    if y_leader and y_leader.get("name"):
+        c = name2code.get(y_leader["name"])
+        if c:
+            tier[c] = f'龙头{y_leader.get("height") or ""}板'
+    if y_zj and y_zj.get("name"):
+        c = name2code.get(y_zj["name"])
+        if c:
+            tier[c] = "中军"
+    for s in y_sb:
+        c = name2code.get(s.get("name"))
+        if c:
+            tier[c] = f'龙头断板·{s.get("state", "")}'
+    for x in y_pool:
+        c = x.get("ts_code")
+        if c and c not in tier:
+            tier[c] = f'昨日{x.get("height", 1)}板'
+    prio = [c for c in tier if c in pct]
+    rest = [c for c in pct if c in code_set and c not in tier]
+    rest.sort(key=lambda c: -pct[c])
+    sel = (prio + rest)[:n]
+    items = [{"ts_code": c, "name": names.get(c, c),
+              "pct": round(float(pct[c]), 2),
+              "tier": tier.get(c, "跟风"),
+              "y_pct": (round(float(y_pct[c]), 2)
+                        if c in y_pct else None),
+              "y_lb": y_lb.get(c, 0)}
+             for c in sel]
+    return {"title": title, "date": date, "items": items,
+            "n_members": len(codes),
+            # 有行情数 = 该分组成分中有当日涨幅的(不是全市场数)
+            "n_quoted": len([c for c in codes if c in pct]),
+            "prev_date": prev_d,
+            "y_leader": y_leader, "y_zhongjun": y_zj,
+            "y_shortboard": [{"name": s.get("name"), "state": s.get("state")}
+                             for s in y_sb],
+            "y_pool_n": len(y_pool)}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(WEB), **kw)
@@ -1230,14 +1598,84 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if parsed.path == "/api/ai_agent/stream":
+            return self._ai_agent_stream()
+        if parsed.path == "/api/ai_agent/state":
+            from core.ai_agent_graph import read_run_state
+            return self._send_json(json.dumps(read_run_state() or {},
+                                              ensure_ascii=False))
+        if parsed.path == "/api/ai_factor":
+            return self._ai_factor(parsed)
+        if parsed.path == "/api/ai_factor_history":
+            return self._ai_factor_history(parsed)
+        if parsed.path == "/api/ainews":
+            from core import newsfeed
+            from datetime import datetime as _dt
+            day = (parse_qs(parsed.query).get("date") or [None])[0] \
+                or _dt.now().strftime("%Y%m%d")
+            items = newsfeed.read_subscribed(
+                [s["id"] for s in newsfeed.enabled_sources()], day, None,
+                limit=40)
+            return self._send_json(json.dumps({"date": day, "items": [
+                {"t": it.get("t"), "title": it.get("title"),
+                 "source": it.get("source"), "ts": it.get("ts"),
+                 "text": (it.get("text") or "")[:300]} for it in items]},
+                ensure_ascii=False))
         if parsed.path == "/api/live":
             f = DATA / "live" / "latest.json"
-            return self._send_json(f.read_text(encoding="utf-8")
-                                   if f.exists() else '{"error":"no live data"}')
+            if not f.exists():
+                return self._send_json('{"error":"no live data"}')
+            raw = f.read_text(encoding="utf-8")
+            # status 是 poller 写入时刻的判断; 数据陈旧(非今日/已收盘)时
+            # 会过期失真——昨天的快照仍显示"盘中"。用真实当前时间复核:
+            # 仅当数据日==今日且现在处于轮询时段才算 live, 否则收盘快照。
+            try:
+                d = json.loads(raw)
+                if d.get("status") == "live":
+                    from datetime import datetime as _dt
+                    from core.calendar import is_polling_hours
+                    n = _dt.now()
+                    if not (d.get("date") == n.strftime("%Y%m%d")
+                            and is_polling_hours(n)):
+                        d["status"] = "snapshot"
+                        raw = json.dumps(d, ensure_ascii=False)
+            except Exception:
+                pass
+            return self._send_json(raw)
         if parsed.path == "/api/radar":
             f = DATA / "live" / "radar.json"
-            return self._send_json(f.read_text(encoding="utf-8")
-                                   if f.exists() else '{"error":"no radar data"}')
+            if not f.exists():
+                return self._send_json('{"error":"no radar data"}')
+            raw = f.read_text(encoding="utf-8")
+            # 申万一级/二级兑底补全: radar.json 由雷达盘中写,
+            # 陈旧文件(旧进程产出)可能缺 sw_l1/sw_l2, 导致看板「板块列」
+            # 全部显示 "-"。这里从 sw_map 补齐, 不等雷达下一轮。
+            try:
+                d = json.loads(raw)
+                stocks = d.get("stocks") or []
+                if stocks and not stocks[0].get("sw_l2"):
+                    fsw = DATA / "meta" / "sw_map.json"
+                    if fsw.exists():
+                        sw_map = json.loads(fsw.read_text(encoding="utf-8"))
+                        for s in stocks:
+                            m = sw_map.get(s.get("ts_code"))
+                            if m:
+                                s["sw_l1"] = m.get("l1")
+                                s["sw_l2"] = m.get("l2")
+                        raw = json.dumps(d, ensure_ascii=False)
+            except Exception:
+                pass                       # 补全失败不阻断, 原样返回
+            return self._send_json(raw)
+        if parsed.path == "/api/playbook":
+            ref = parse_qs(parsed.query).get("ref", [""])[0]
+            if not ref:
+                return self._send_json('{"error":"ref required"}', 400)
+            try:
+                return self._send_json(
+                    json.dumps(_playbook_payload(ref), ensure_ascii=False))
+            except Exception as e:
+                return self._send_json(
+                    json.dumps({"error": str(e)}, ensure_ascii=False), 500)
         if parsed.path == "/api/focus":
             f = DATA / "live" / "focus.json"
             return self._send_json(f.read_text(encoding="utf-8")
@@ -1270,6 +1708,21 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 result = _build_intraday(code, date)
                 return self._send_json(json.dumps(result, ensure_ascii=False))
+            except Exception as e:
+                return self._send_json(
+                    json.dumps({"error": str(e)}, ensure_ascii=False), 500)
+        if parsed.path == "/api/grptop":
+            from datetime import datetime as _dt
+            q = parse_qs(parsed.query)
+            kind = q.get("type", ["concept"])[0]
+            name = q.get("name", [""])[0]
+            date = q.get("date", [_dt.now().strftime("%Y%m%d")])[0]
+            if not name:
+                return self._send_json('{"error":"name required"}', 400)
+            try:
+                n = min(12, int(q.get("n", ["8"])[0]))
+                return self._send_json(json.dumps(
+                    _group_top(kind, name, date, n), ensure_ascii=False))
             except Exception as e:
                 return self._send_json(
                     json.dumps({"error": str(e)}, ensure_ascii=False), 500)
@@ -1399,9 +1852,34 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as e:
                 return self._send_json(
                     json.dumps({"error": str(e)}, ensure_ascii=False), 500)
+        if parsed.path == "/api/aiclues":
+            date = parse_qs(parsed.query).get("date", [None])[0]
+            return self._send_json(json.dumps(_aiclues_payload(date),
+                                              ensure_ascii=False))
+        if parsed.path == "/api/aisources":
+            return self._send_json(json.dumps(_aisources_payload(),
+                                              ensure_ascii=False))
+        if parsed.path == "/api/aiclue_index":
+            date = parse_qs(parsed.query).get("date", [None])[0]
+            return self._send_json(json.dumps(_aiclue_index_payload(date),
+                                              ensure_ascii=False))
+        if parsed.path == "/api/aiclue_dates":
+            return self._send_json(json.dumps(_aiclue_dates_payload(),
+                                              ensure_ascii=False))
         if parsed.path == "/api/dates":
             ev = load("limitup.events_enriched", columns=["trade_date"])
             dates = sorted(ev["trade_date"].unique())[-60:][::-1]
+            # live=1: 前向预警表要能看今日盘中信号。events_enriched 是
+            # T+1 富化表, 今日尚未入表, 但 presig_state_{today}.json 已由
+            # 雷达实时产出。不加今日则日期导航默认停在上一交易日。
+            # 复盘页/申万资金不用 live=1 —— 它们依赖收盘后产出的快照,
+            # 今日快照还不存在, 加进去会点出空页。
+            if parse_qs(parsed.query).get("live", ["0"])[0] == "1":
+                from datetime import datetime as _dt
+                today = _dt.now().strftime("%Y%m%d")
+                if (DATA / "live" / f"presig_state_{today}.json").exists() \
+                        and today not in dates:
+                    dates = [today] + dates
             return self._send_json(json.dumps({"dates": dates}))
         return super().do_GET()
 
@@ -1428,6 +1906,29 @@ class Handler(SimpleHTTPRequestHandler):
                              encoding="utf-8")
                 return self._send_json(json.dumps(
                     {"ok": True, "n": len(clean["items"])}))
+            except Exception as e:
+                return self._send_json(
+                    json.dumps({"error": str(e)}, ensure_ascii=False), 500)
+        if parsed.path == "/api/ai_agent/analyze":
+            return self._ai_agent_analyze()
+        if parsed.path == "/api/aisources":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n).decode("utf-8")
+                                  if n else "{}")
+                if "sources" in body:
+                    newsfeed.save_sources(body["sources"])
+                p = body.get("producer")
+                if isinstance(p, dict):
+                    name = p.get("name") or "llm_clue"
+                    cfg = _llm_config()
+                    cur = dict(cfg.get(name) or {})
+                    for k in ("sources", "enabled", "model", "prompt"):
+                        if k in p:
+                            cur[k] = p[k]
+                    cfg[name] = cur
+                    save_llm_config(cfg)
+                return self._send_json(json.dumps({"ok": True}))
             except Exception as e:
                 return self._send_json(
                     json.dumps({"error": str(e)}, ensure_ascii=False), 500)
@@ -1518,6 +2019,177 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:
             return self._send_json(
                 json.dumps({"error": str(e)}, ensure_ascii=False), 500)
+
+    # ---------- AI 题材智能体(SSE 实时可视化 + 因子 + 手动分析) ----------
+
+    def _sse_head(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+    def _sse_send(self, obj):
+        self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+                         .encode("utf-8"))
+        self.wfile.flush()
+
+    def _ai_agent_stream(self):
+        """SSE: 轮询运行态文件 mtime, 变化即推快照(角色卡/辩论/结论
+        逐步填充)。生产者进程写文件, 本端点跨进程读 → 实时观看分析。"""
+        import time as _t
+        from core.ai_agent_graph import RUN_STATE_PATH, read_run_state
+        self._sse_head()
+        last_m, idle = 0.0, 0
+        try:
+            while True:
+                m = (RUN_STATE_PATH.stat().st_mtime
+                     if RUN_STATE_PATH.exists() else 0.0)
+                if m != last_m:
+                    last_m, idle = m, 0
+                    st = read_run_state()
+                    if st:
+                        self._sse_send(st)
+                else:
+                    idle += 1
+                    if idle % 20 == 0:            # ~16s 心跳保活
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                _t.sleep(0.8)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _ai_factor(self, parsed):
+        """题材级因子(已落地 feed); 默认今日, 可 ?date= 看历史。"""
+        from datetime import datetime as _dt
+        from rqalpha_mod_ticai import feeds
+        date = (parse_qs(parsed.query).get("date") or [None])[0]
+        day = date or _dt.now().strftime("%Y%m%d")
+        entries = feeds.read_feed("theme_factor", day)   # 展示用, 不加闸门
+        return self._send_json(json.dumps({"date": day, "entries": entries},
+                                          ensure_ascii=False))
+
+    def _ai_factor_history(self, parsed):
+        """近N日题材因子(时间维度: 决策日志 + 题材演进)。只取摘要字段。"""
+        from rqalpha_mod_ticai import feeds
+        days = int((parse_qs(parsed.query).get("days") or ["10"])[0])
+        fdir = DATA / "sim" / "ai_feeds" / "theme_factor"
+        avail = []
+        if fdir.exists():
+            avail = sorted([f.stem for f in fdir.glob("*.json")],
+                           reverse=True)[:days]
+        out = []
+        for day in avail:
+            for e in feeds.read_feed("theme_factor", day):
+                ex = e.get("extra") or {}
+                f = ex.get("factor") or {}
+                out.append({"date": day, "ts": e.get("ts"),
+                            "topic": e.get("topic"),
+                            "verdict": f.get("verdict"),
+                            "strength": f.get("strength"),
+                            "sustainability": f.get("sustainability"),
+                            "theme_stage": f.get("theme_stage"),
+                            "first_catalyst": f.get("first_catalyst"),
+                            "conclusion": e.get("text"),
+                            "extra": {"factor": f, "roles": ex.get("roles"),
+                                      "debate": ex.get("debate")}})
+        out.sort(key=lambda x: -(x.get("ts") or 0))
+        return self._send_json(json.dumps({"days": avail, "entries": out},
+                                          ensure_ascii=False))
+
+    def _match_theme(self, title: str):
+        """从新闻标题推断题材名(radar热题 ∪ theme.day当日题材, 子串匹配)。"""
+        if not title:
+            return None
+        names = set()
+        f = DATA / "live" / "radar.json"
+        if f.exists():
+            try:
+                for t in json.loads(
+                        f.read_text(encoding="utf-8")).get("themes") or []:
+                    if t.get("name"):
+                        names.add(t["name"])
+            except Exception:
+                pass
+        try:
+            from datastore import load
+            td = load("theme.day", columns=["trade_date", "concept_code"])
+            d = td["trade_date"].max()
+            names |= set(td[td["trade_date"] == d]["concept_code"])
+        except Exception:
+            pass
+        for n in sorted(names, key=len, reverse=True):
+            if len(n) >= 2 and n in title:
+                return n
+        return None
+
+    def _ai_agent_analyze(self):
+        """手动点新闻 → 即时跑智能体, SSE 流式回该次分析(仅展示, 不落盘)。
+        排队: 同一时刻只跑一个深挖任务, 下一个排队等待(不顶替上一个)。
+        去重: 同一条新闻(标题)只跑一次, 重复点击直接提示已分析。"""
+        from datetime import datetime as _dt
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(n).decode("utf-8")
+                              if n else "{}")
+        except Exception as e:
+            return self._send_json(json.dumps(
+                {"error": f"body解析失败:{e}"}, ensure_ascii=False), 400)
+        news = body.get("news") or {}
+        theme = ((body.get("theme") or "").strip()
+                 or self._match_theme(news.get("title")))
+        if not theme:
+            return self._send_json(json.dumps(
+                {"error": "未能从新闻推断题材, 请显式指定 theme"},
+                ensure_ascii=False), 400)
+        day = body.get("day") or _dt.now().strftime("%Y%m%d")
+        news_key = (news.get("title") or "").strip()
+        self._sse_head()
+
+        def emit(ev):
+            try:
+                self._sse_send(ev)
+            except Exception:
+                pass
+        # 去重: 同一条新闻已分析过 → 不重复执行
+        if news_key and news_key in _DIG_DONE:
+            emit({"type": "status", "content": "该新闻已分析过, 不重复执行"})
+            emit({"type": "done", "theme": theme,
+                  "conclusion": "(同一条新闻已分析过, 跳过重复执行)",
+                  "factor": None, "src": "dedup"})
+            return
+        # 排队: 上一个深挖未完成则等待(不顶替)
+        if _DIG_LOCK.locked():
+            emit({"type": "status", "content": "排队中…(等待上一个分析任务完成)"})
+        with _DIG_LOCK:
+            from core.ai_agent_graph import judge_worth, run_graph
+            news_items = [news] if news.get("title") else None
+            # 深挖价值判断闸门: 先判断是否值得深挖, 不值得则不继续
+            emit({"type": "status", "content": "深挖价值判断中…"})
+            worth = judge_worth(theme, news_items)
+            ok = bool(worth.get("worth"))
+            emit({"type": "status",
+                  "content": f"深挖价值判断: {'✓ 值得深挖' if ok else '✗ 不值得深挖'} — {worth.get('reason')}"})
+            if not ok:
+                emit({"type": "done", "theme": theme,
+                      "conclusion": f"不值得深挖: {worth.get('reason')}",
+                      "factor": None, "src": "not_worth"})
+                return
+            if news_key:
+                _DIG_DONE.add(news_key)
+            emit({"type": "status", "content": "开始深挖 " + theme})
+            try:
+                res = run_graph(theme, day=day, cutoff=None,
+                                news_items=news_items, emit_cb=emit)
+                self._sse_send({"type": "done", "theme": theme,
+                                "conclusion": res.get("conclusion"),
+                                "factor": res.get("factor"),
+                                "src": res.get("src")})
+            except Exception as e:
+                if news_key:
+                    _DIG_DONE.discard(news_key)   # 失败不标记, 允许重试
+                self._sse_send({"type": "error", "theme": theme,
+                                "content": f"{type(e).__name__}: {e}"})
 
     def _send_json(self, text: str, code: int = 200):
         body = text.encode("utf-8")

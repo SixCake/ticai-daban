@@ -105,17 +105,24 @@ class FillSimGate:
 
 
 def limit_price_of(trigger_px: float, pre_close: float | None,
-                   slip: float = DEFAULT_ORDER_SLIP) -> float:
+                   slip: float = DEFAULT_ORDER_SLIP,
+                   limit_up: float | None = None) -> float:
     """高挂限价单价格 = min(触发价×(1+slip), 涨停价)。
 
     研究定稿口径(与 research/jq_v5_strategy.py 一致): 限价≥现价时
     rqalpha 以现价即时成交(效果同市价), 但成交价有上界 —— 防暴拉瞬间
     异常高价, 涨停价封顶(实盘扫板同款挂法)。
-    pre_close 缺失时不封顶(调用方应保证有昨收)。
+
+    涨停价优先用调用方传入的 limit_up(雷达/bar 的精确涨停价);
+    缺失时才用 pre_close×1.1 主板兜底(创业板/科创板 20% 会不准)。
+    两者都缺失时不封顶(调用方应保证至少一个有值)。
     """
     px = round(trigger_px * (1 + slip), 2)
-    if pre_close and pre_close > 0:
+    cap = limit_up if (limit_up and limit_up > 0) else None
+    if cap is None and pre_close and pre_close > 0:
         # 涨停价档位由调用方传入的昨收推算; 此处按主板 10% 兜底,
         # 精确档位见 data_source._load_panel 的向量化口径
-        px = min(px, round(pre_close * 1.1, 2))
+        cap = round(pre_close * 1.1, 2)
+    if cap is not None:
+        px = min(px, round(cap, 2))
     return px
