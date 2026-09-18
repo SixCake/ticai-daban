@@ -30,6 +30,10 @@ echo "==> 指数日线补尾(供策略模拟的宽基基准; 失败不影响主�
 "$PY" collect/fetch_index_panel.py || echo "指数补尾失败(策略模拟只能用自建打板基准 DBBNCH)"
 echo "==> 竞价数据T+1官方校正(stk_auction, 只补official对照不覆盖盘中值)"
 "$PY" collect/fetch_auction.py --days 3 || echo "竞价校正失败(竞价影子字段无官方对照)"
+echo "==> 龙虎榜游资席位明细(tushare hm_detail, 收盘后晚间更新)"
+"$PY" collect/fetch_hm_detail.py || echo "游资明细拉取失败(复盘龙虎榜小节沿用旧数据)"
+echo "==> 席位TOP1选股生成+实际收益回填(hmlist.picks)"
+"$PY" build/hm_picks.py || echo "席位选股失败(复盘龙虎榜小节降级隐藏)"
 echo "==> 重建事件富化(一字板/T+1收益)"
 "$PY" build/enrich_events.py
 echo "==> 重建题材归属"

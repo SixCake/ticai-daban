@@ -197,6 +197,110 @@ def _lu_fields(code: str, reasons: dict) -> dict:
 OUT = DATA / "review"
 OUT.mkdir(exist_ok=True)
 
+# ---------- 龙虎榜·游资席位(hmlist.picks, 每日复盘的昨日兑现总结+今日信号) ----------
+
+HM_RELIABILITY_WIN = 40   # 席位可靠性榜窗口(有picks的交易日数)
+
+
+def _hm_picks_rows(df: pd.DataFrame) -> list:
+    def _f(v, nd=2):
+        return round(float(v), nd) if pd.notna(v) else None
+    out = []
+    for r in df.sort_values("score", ascending=False,
+                            na_position="last").itertuples():
+        out.append({
+            "hm_name": r.hm_name, "ts_code": r.ts_code, "ts_name": r.ts_name,
+            "grade": r.grade if isinstance(r.grade, str) else "NA",
+            "score": _f(r.score, 1),
+            "hist_signals": int(r.hist_signals) if pd.notna(r.hist_signals) else None,
+            "hist_win_rate": _f(r.hist_win_rate, 1),
+            "pred_ret1": _f(r.pred_ret1),
+            "buy_amount": float(r.buy_amount) if pd.notna(r.buy_amount) else None,
+            "net_amount": float(r.net_amount) if pd.notna(r.net_amount) else None,
+            "base_pct": _f(r.base_pct),
+            "act_open_ret": _f(r.act_open_ret),
+            "act_close_ret": _f(r.act_close_ret),
+            "verdict": r.verdict if isinstance(r.verdict, str) else "pending",
+            "hit_top": bool(r.hit_top) if pd.notna(r.hit_top) else False})
+    return out
+
+
+def _hm_block(date: str) -> dict:
+    """龙虎榜席位块: 今日TOP1信号 + 昨日兑现总结 + 席位可靠性榜。
+    picks 缺失或当日无数据时返回 {}(前端整节隐藏)。"""
+    if not path_of("hmlist.picks").exists():
+        return {}
+    picks = _load_cached("hmlist.picks", None)
+    if picks.empty:
+        return {}
+    picks = picks.assign(trade_date=picks["trade_date"].astype(str))
+    pdates = sorted(picks["trade_date"].unique())
+
+    today = picks[picks["trade_date"] == date]
+    prev_d = max((d for d in pdates if d < date), default=None)
+    prev = picks[picks["trade_date"] == prev_d] if prev_d else picks.iloc[0:0]
+
+    # 昨日兑现总结(已验证行)
+    summary = {}
+    done = prev[prev["verdict"].isin(["win", "lose"])]
+    if len(done):
+        top = done[done["hit_top"]]
+        summary = {
+            "date": prev_d, "n": int(len(prev)), "n_done": int(len(done)),
+            "wins": int((done["verdict"] == "win").sum()),
+            "win_rate": round(float((done["verdict"] == "win").mean()) * 100, 1),
+            "mean_ret": round(float(done["act_close_ret"].mean()), 2),
+            "mean_open": (round(float(done["act_open_ret"].mean()), 2)
+                          if done["act_open_ret"].notna().any() else None),
+            "top_n": int(len(top)),
+            "top_win_rate": (round(float((top["verdict"] == "win").mean()) * 100, 1)
+                             if len(top) else None),
+            "top_mean_ret": (round(float(top["act_close_ret"].mean()), 2)
+                             if len(top) else None)}
+        # 预测vs实际相关性(全窗口有预测值的已验证行, 模型校准参考)
+        cal = picks[picks["pred_ret1"].notna()
+                    & picks["act_close_ret"].notna()
+                    & picks["verdict"].isin(["win", "lose"])]
+        if len(cal) >= 20:
+            corr = float(np.corrcoef(cal["pred_ret1"], cal["act_close_ret"])[0, 1])
+            summary["pred_corr"] = round(corr, 3) if np.isfinite(corr) else None
+
+    # 席位可靠性榜(近N个有picks的交易日, 按出手数排序)
+    win_dates = [d for d in pdates if d <= date][-HM_RELIABILITY_WIN:]
+    wp = picks[picks["trade_date"].isin(win_dates)
+               & picks["verdict"].isin(["win", "lose"])]
+    reliability = []
+    for name, g in wp.groupby("hm_name"):
+        g = g.sort_values("trade_date")
+        n = len(g)
+        if n < 3:                       # 样本过少不入榜
+            continue
+        wins = int((g["verdict"] == "win").sum())
+        streak, sv = 0, None
+        for v in reversed(g["verdict"].tolist()):
+            if sv is None:
+                sv, streak = v, 1
+            elif v == sv:
+                streak += 1
+            else:
+                break
+        reliability.append({
+            "hm_name": name, "n": n, "wins": wins,
+            "win_rate": round(wins / n * 100, 1),
+            "mean_ret": round(float(g["act_close_ret"].mean()), 2),
+            "mean_2d": (round(float(g["act_2d_ret"].mean()), 2)
+                        if g["act_2d_ret"].notna().any() else None),
+            "streak": streak if sv == "win" else -streak})
+    reliability.sort(key=lambda r: (-r["n"], -r["win_rate"]))
+
+    if today.empty and prev.empty and not reliability:
+        return {}
+    return {"picks_today": _hm_picks_rows(today),
+            "picks_prev": _hm_picks_rows(prev),
+            "prev_summary": summary,
+            "reliability": reliability[:20],
+            "reliability_win": len(win_dates)}
+
 
 def _events(date: str) -> pd.DataFrame:
     ev = load("limitup.events_enriched")
@@ -523,7 +627,8 @@ def build_review(date: str) -> dict:
     return {"date": date, "prev_date": prev, "sentiment": sentiment,
             "themes": themes, "ladder_stocks": ladder_stocks,
             "reality_cells": rc_list, "prev_reality_cells": prev_rc_list,
-            "pool": pool_list, "stats": stats, "shortboard": sb_list}
+            "pool": pool_list, "stats": stats, "shortboard": sb_list,
+            "hm": _hm_block(date)}
 
 
 def build_theme_replay(concept_code: str, start: str, end: str,

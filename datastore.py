@@ -2,7 +2,7 @@
 """数据目录与统一查询层（唯一出处）
 
 目录规范: data/{域}/{频率}/{数据集}
-  域:   limitup 涨停 | theme 题材 | market 行情 | factor 因子 | meta 基础
+  域:   limitup 涨停 | theme 题材 | market 行情 | factor 因子 | hmlist 龙虎榜 | meta 基础
   频率: 1d 日频 | 1m 分钟 | static 无时间维度
   live/ 与 review/ 为盘中瞬态/缓存, 不入目录
 
@@ -111,6 +111,18 @@ DATASETS = {
     "meta.trade_cal": (
         "meta/trade_cal.parquet", "static", False,
         "SSE交易日历缓存"),
+    "hmlist.detail": (
+        "hmlist/1d/hm_detail.parquet", "1d", False,
+        "龙虎榜游资席位明细 tushare hm_detail 增量(席位×个股买卖额), "
+        "供席位评级与每日TOP1选股"),
+    "hmlist.seat_rating": (
+        "hmlist/1d/seat_rating.parquet", "1d", False,
+        "游资席位滚动3个月评级月快照(混合评级/评分/胜率/次日收益/风格因子), "
+        "rating_month维度; 202608为workspace导入"),
+    "hmlist.picks": (
+        "hmlist/1d/picks.parquet", "1d", False,
+        "席位TOP1每日选股事实表: 预测快照(评级/预测收益)+T+1/T+2实际收益回填"
+        "+verdict胜负; 供游资成功率/可靠性统计与复盘昨日兑现总结"),
 }
 
 # 分区数据集文件名中的日期格式

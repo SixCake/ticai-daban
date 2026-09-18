@@ -124,6 +124,14 @@
   .b-hot{background:#4d1f00;color:#ff9d00;}
   .b-age{background:#0d2d4d;color:var(--blue);}
   .b-h{background:#3d1440;color:#e060ff;}
+  /* 龙虎榜席位混合评级徽章(A金/B蓝/C灰/NA暗) */
+  .b-gA{background:#4d1f00;color:#ffb000;font-weight:700;}
+  .b-gB{background:#0d2d4d;color:#79c0ff;}
+  .b-gC,.b-gNA{background:#21262d;color:var(--dim);}
+  .hm-sum{display:flex;gap:16px;flex-wrap:wrap;align-items:baseline;
+    margin-bottom:8px;font-size:13px;color:var(--dim);}
+  .hm-sum b{font-size:15px;}
+  tr.hm-top td{background:rgba(255,157,0,.06);}
   .cand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:10px;}
   .cand{background:linear-gradient(160deg,#1d2735,#161b22);
     border:1px solid var(--gold);border-radius:10px;padding:12px;
@@ -373,6 +381,10 @@
   <section>
     <h2>前一交易日现实格兑现验证</h2>
     <div id="rv-prevcells"></div>
+  </section>
+  <section id="rv-hm-sec" class="hide">
+    <h2>龙虎榜 · 游资席位 TOP1 信号<span class="hint">每席位取当日买入额TOP1股 · 评级=滚动3个月混合评级(月初快照) · 昨日选股已回填实际收益 · 橙底行=A/B级或评分≥60</span></h2>
+    <div id="rv-hm"></div>
   </section>
   <section>
     <h2>涨停池全明细<span class="hint">悬停「原因」浮窗展示涨停原因(首位为主炒题材)/板型/封板状态/近一年封板率 · 同花顺榜单口径, 北交所用开盘啦兜底 · 点股票名看分时+日K</span></h2>
@@ -1298,6 +1310,8 @@ async function loadReview(){
     ${pv.map(c=>`<tr><td>${c.name}</td><td>${c.theme}</td><td>${c.date}</td>
       <td class="${retCls(c.next_open_ret)}"><b>${retTxt(c.next_open_ret)}</b></td></tr>`).join('')}</table>`
     :'<div class="empty">前一交易日无现实格信号</div>';
+  // 龙虎榜·游资席位
+  renderHm(d.hm);
   // 涨停池明细
   $('rv-pool').innerHTML=`<table><tr><th>股票</th><th>连板</th><th>题材(家数)</th><th>炸板</th><th>首封</th><th>末封</th><th>封单</th><th>一字</th><th>T+1</th></tr>
     ${d.pool.map(p=>`<tr><td><span class="stklink" onclick="openDetail('${p.ts_code}','${p.name}')">${p.name}</span> ${roleBadges(p)}${rsnBtn(p)}</td>
@@ -1306,6 +1320,68 @@ async function loadReview(){
       <td>${p.open_times}</td><td>${fmtT(p.first_time)}</td><td>${fmtT(p.last_time)}</td>
       <td>${fmtAmt(p.fd_amount)}</td><td>${p.is_yizi?'✓':''}</td>
       <td class="${retCls(p.next_open_ret)}">${retTxt(p.next_open_ret)}</td></tr>`).join('')}</table>`;
+}
+
+/* ---------- 龙虎榜·游资席位(复盘页小节) ---------- */
+const hmGrade=g=>`<span class="badge b-g${['A','B','C'].includes(g)?g:'NA'}">${g||'NA'}</span>`;
+const hmVerdict=v=>v==='win'?'<span class="up">✓胜</span>':v==='lose'?'<span class="down">✗负</span>':'<span class="flat">…待</span>';
+function renderHm(hm){
+  const sec=$('rv-hm-sec');
+  if(!hm||(!hm.picks_today?.length&&!hm.picks_prev?.length&&!hm.reliability?.length)){
+    sec.classList.add('hide');return;}
+  sec.classList.remove('hide');
+  let h='';
+  // ① 昨日预测兑现总结
+  const s=hm.prev_summary||{};
+  const pv=hm.picks_prev||[];
+  if(pv.length){
+    h+=`<div class="hm-sum"><span>昨日(${s.date||'-'})选股兑现:</span>
+      <span>选出 <b>${s.n??pv.length}</b></span>
+      <span>已验证 <b>${s.n_done??'-'}</b></span>
+      <span>胜 <b class="up">${s.wins??'-'}</b></span>
+      <span>胜率 <b>${s.win_rate!=null?s.win_rate+'%':'-'}</b></span>
+      <span>均收盘 <b class="${retCls(s.mean_ret)}">${retTxt(s.mean_ret)}</b></span>
+      <span>均开盘 <b class="${retCls(s.mean_open)}">${retTxt(s.mean_open)}</b></span>
+      ${s.top_n?`<span>A/B或评分≥60: <b>${s.top_n}</b>笔 胜率<b>${s.top_win_rate}%</b> 均<b class="${retCls(s.top_mean_ret)}">${retTxt(s.top_mean_ret)}</b></span>`:''}
+      ${s.pred_corr!=null?`<span title="全历史 预测收益vs实际收盘收益 相关系数">模型相关 <b>${s.pred_corr}</b></span>`:''}
+      </div>`;
+    h+=`<div class="scroll" style="max-height:260px"><table><tr><th>席位</th><th>评级</th><th>股票</th><th>基准日涨幅</th><th>预测次日</th><th>实际开盘</th><th>实际收盘</th><th>判定</th></tr>
+      ${pv.map(p=>`<tr class="${p.hit_top?'hm-top':''}"><td>${p.hm_name}</td><td>${hmGrade(p.grade)}</td>
+        <td><span class="stklink" onclick="openDetail('${p.ts_code}','${p.ts_name}')">${p.ts_name}</span></td>
+        <td class="${retCls(p.base_pct)}">${retTxt(p.base_pct)}</td>
+        <td class="${retCls(p.pred_ret1)}">${retTxt(p.pred_ret1)}</td>
+        <td class="${retCls(p.act_open_ret)}">${retTxt(p.act_open_ret)}</td>
+        <td class="${retCls(p.act_close_ret)}"><b>${retTxt(p.act_close_ret)}</b></td>
+        <td>${hmVerdict(p.verdict)}</td></tr>`).join('')}</table></div>`;
+  }
+  // ② 今日席位信号
+  const td=hm.picks_today||[];
+  if(td.length){
+    h+=`<h3 style="margin:14px 0 6px;font-size:14px;color:var(--gold)">今日席位信号(预测下一交易日)</h3>
+      <div class="scroll" style="max-height:320px"><table><tr><th>席位</th><th>评级</th><th>评分</th><th>股票</th><th>历史胜率</th><th>信号数</th><th>买入额</th><th>净额</th><th>基准日涨幅</th><th>预测次日</th></tr>
+      ${td.map(p=>`<tr class="${p.hit_top?'hm-top':''}"><td>${p.hm_name}</td><td>${hmGrade(p.grade)}</td>
+        <td>${p.score!=null?p.score:'-'}</td>
+        <td><span class="stklink" onclick="openDetail('${p.ts_code}','${p.ts_name}')">${p.ts_name}</span></td>
+        <td>${p.hist_win_rate!=null?p.hist_win_rate+'%':'-'}</td>
+        <td>${p.hist_signals??'-'}</td>
+        <td>${p.buy_amount!=null?fmtAmt(p.buy_amount):'-'}</td>
+        <td class="${retCls(p.net_amount)}">${p.net_amount!=null?fmtAmt(p.net_amount):'-'}</td>
+        <td class="${retCls(p.base_pct)}">${retTxt(p.base_pct)}</td>
+        <td class="${retCls(p.pred_ret1)}"><b>${retTxt(p.pred_ret1)}</b></td></tr>`).join('')}</table></div>`;
+  }
+  // ③ 席位可靠性榜(折叠)
+  const rl=hm.reliability||[];
+  if(rl.length){
+    const st=x=>x.streak>0?`<span class="up">${x.streak}连胜</span>`:x.streak<0?`<span class="down">${-x.streak}连败</span>`:'-';
+    h+=`<details style="margin-top:10px"><summary style="cursor:pointer;color:var(--dim);font-size:13px">席位可靠性榜(近${hm.reliability_win||'-'}个信号日, 出手≥3, 按出手数排序)</summary>
+      <div class="scroll" style="max-height:300px;margin-top:6px"><table><tr><th>席位</th><th>出手</th><th>胜</th><th>胜率</th><th>均次日收益</th><th>均2日收益</th><th>当前连续</th></tr>
+      ${rl.map(x=>`<tr><td>${x.hm_name}</td><td>${x.n}</td><td>${x.wins}</td>
+        <td><b>${x.win_rate}%</b></td>
+        <td class="${retCls(x.mean_ret)}">${retTxt(x.mean_ret)}</td>
+        <td class="${retCls(x.mean_2d)}">${retTxt(x.mean_2d)}</td>
+        <td>${st(x)}</td></tr>`).join('')}</table></div></details>`;
+  }
+  $('rv-hm').innerHTML=h;
 }
 
 /* ---------- 预警雷达 ---------- */
