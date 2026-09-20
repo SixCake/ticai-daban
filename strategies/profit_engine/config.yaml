@@ -1,0 +1,26 @@
+# 策略配置 — profit_engine
+# 盈利引擎独立策略（决策链路验证的唯一达标高盈亏比模式）
+# 昨日封板E3高票次日开盘卖（研究51盈亏比3.74），独立于 tri_lever/v5_daban。
+# 参数口径见 strategies/_template/SPEC.md 与同目录 strategy.py docstring
+
+name: profit_engine
+description: 盈利引擎独立策略（低位打板 + 封板E3≥0.20续持 + 次日开盘卖捕获隔夜溢价3.74）
+
+# ---- 账户 ----
+capital: 1000000          # 初始资金（与 tri_lever/v5_daban 同口径, 便于对比）
+benchmark: DBBNCH.XSHG    # 自建打板基准（全A等权涨幅累积）
+
+# ---- AI feed 订阅 ----
+# 只能读这里声明过的 feed(隔离规范); 未声明的调用会被拒绝并告警
+feeds:
+  - theme_narrative       # 题材叙事强度(apps/ai_feed.py 产出)
+  - market_risk           # 市场风险标注
+
+# ---- 框架 Mod 参数 ----
+mod:
+  mode: replay            # replay=历史回放 | live=盘中实时
+  poll_interval: 20
+  catchup: true
+  fill_sim: 0.30          # 成交概率抽样（研究定稿值）
+  fill_seed: 42
+  order_slip: 0.005       # 高挂限价容差

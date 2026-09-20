@@ -157,6 +157,19 @@ class TicaiApi:
             out[code] = d
         return out
 
+    def seal_strength(self) -> dict:
+        """封板强度 E3 {rqalpha代码: 封单额/成交额} —— E3≥0.20续持盈亏比3.74(研究51)"""
+        ds = self._data_source()
+        if ds is None or not hasattr(ds, "seal_strength"):
+            return {}
+        snap = ds.seal_strength(self.day())
+        out = {}
+        for c, v in snap.items():
+            code = to_rq(c)
+            if code is not None:
+                out[code] = v
+        return out
+
     def theme_heat(self) -> list:
         """题材热度自算排名(core/heat.py 口径), 按 heat 降序"""
         return [dict(t) for t in (self._radar().get("themes") or [])]
@@ -243,6 +256,12 @@ def install(env, strategy: str, feeds_allowed: list | None = None) -> TicaiApi:
     def ticai_struct():
         """V5 结构层影子分 {代码: {g_chip, gate, v5, zb20, ir}}"""
         return _inst().struct()
+
+    @export_as_api
+    @ExecutionContext.enforce_phase(*_ALL_PHASES)
+    def ticai_seal_strength():
+        """封板强度 E3 {代码: 封单额/成交额} —— E3≥0.20续持盈亏比3.74(研究51)"""
+        return _inst().seal_strength()
 
     @export_as_api
     @ExecutionContext.enforce_phase(*_ALL_PHASES)

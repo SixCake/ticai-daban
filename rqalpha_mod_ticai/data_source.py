@@ -828,6 +828,26 @@ class TicaiDataSource:
         self._struct[day] = out
         return out
 
+    def seal_strength(self, day: str) -> dict:
+        """{ts_code: E3封单强度=封单额/成交额} —— 研究50/51: E3≥0.20封板票
+        次日开盘卖盈亏比3.74(38701样本达标)。用于 clear_unsealed 续持判据。
+        从 events_enriched 现算, 按日缓存。"""
+        cache = self.__dict__.setdefault("_seal", {})
+        if day in cache:
+            return cache[day]
+        try:
+            from datastore import load
+            ev = load("limitup.events_enriched",
+                      columns=["trade_date", "ts_code", "fd_amount", "amount"])
+            ev = ev[ev["trade_date"].astype(str) == str(day)]
+            out = {r.ts_code: float(r.fd_amount) / float(r.amount)
+                   for r in ev.itertuples() if r.amount and r.amount > 0}
+        except Exception as e:
+            print(f"[ticai] 封单强度失败({day}): {e}")
+            out = {}
+        cache[day] = out
+        return out
+
     # ---------- 供注入 API 使用的只读视图 ----------
 
     @lru_cache(maxsize=64)

@@ -704,7 +704,7 @@ class Radar:
         # 取不到价格点、现价回退昨收 → 盈亏/净值失真(实测: 003032 昨买
         # 今跌4.3%不在快照, 看板误显示 pnl=0)。持仓股少(数只), 每轮读
         # state(mtime 缓存)开销可忽略。
-        for c in self._sim_holdings():
+        for c in self._sim_holdings() | self._dip_pool_codes():
             q = quotes.get(c)
             if not q or q.get("price", 0) <= 0:
                 continue
@@ -769,6 +769,33 @@ class Radar:
                 codes |= cs
             except Exception:
                 continue
+        return codes
+
+    def _dip_pool_codes(self) -> set:
+        """ma5_dip 低吸候选池 ts_code 集合(按日缓存)。
+
+        为何需要: 低吸标的是首板后回调的票, 当日多为下跌/微涨, 会被分时
+        门槛(pct≥1%或prob≥0.2)滤掉 → live 模式下策略 handle_bar 看不到
+        价格、无法触发低吸。与 _sim_holdings 同理无条件纳入采集(数十只,
+        开销可忽略)。池文件由 build/build_dip_pool.py 前晚产出。"""
+        from rqalpha_mod_ticai import feeds
+        from rqalpha_mod_ticai.codes import from_rq
+        today_s = datetime.now().strftime("%Y%m%d")
+        ck = getattr(self, "_dip_cache", None)
+        if ck and ck[0] == today_s:
+            return ck[1]
+        codes = set()
+        try:
+            p = feeds.feed_path("dip_pool", today_s, strategy="ma5_dip")
+            if p.exists():
+                for e in feeds.read_feed("dip_pool", today_s,
+                                         strategy="ma5_dip"):
+                    tc = from_rq(e.get("topic") or "")
+                    if tc:
+                        codes.add(tc)
+        except Exception:
+            codes = set()
+        self._dip_cache = (today_s, codes)
         return codes
 
     @staticmethod

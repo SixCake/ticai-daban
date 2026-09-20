@@ -11,6 +11,18 @@ strategies:
     enabled: true
     description: V5 两层打板（结构闸选股 + 融合分排序），移植自 research/jq_v5_strategy.py
 
+  - name: tri_lever
+    enabled: true
+    description: 决策链路三杠杆打板（入场价位闸pct<4% + E3续持闸E3≥0.20 + 不止损）
+
+  - name: profit_engine
+    enabled: true
+    description: 盈利引擎独立策略（低位打板 + 封板E3≥0.20续持 + 次日开盘卖捕获隔夜溢价3.74, 分离度量）
+
+  - name: ma5_dip
+    enabled: true
+    description: 首板回调5日线低吸（跨日分批3笔 + 低开10点后VWAP去留 + 尾盘破5日线清仓 + ATR追踪止盈1.5×）
+
   - name: _template
     enabled: false        # 模板不参与运行，仅供复制
     description: 策略模板骨架

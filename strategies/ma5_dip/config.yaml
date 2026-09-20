@@ -1,0 +1,26 @@
+# 策略配置 — ma5_dip
+# 首板回调5日线低吸: 跨日分批 + 低开VWAP判定 + 尾盘破线清仓 + ATR追踪止盈
+# 候选池由 build/build_dip_pool.py 每晚写入私有 feed(接入 daily_update.sh)
+# 参数口径见 strategies/_template/SPEC.md 与同目录 strategy.py docstring
+
+name: ma5_dip
+description: 首板回调5日线低吸（跨日分批3笔 + 低开10点后VWAP去留 + 尾盘破5日线清仓 + ATR追踪止盈1.5×）
+
+# ---- 账户 ----
+capital: 1000000          # 与其他策略同口径, 便于对比
+benchmark: DBBNCH.XSHG    # 自建打板基准（全A等权涨幅累积）
+
+# ---- AI feed 订阅 ----
+# 私有 feed: 只写 data/sim/ai_feeds/private/ma5_dip/dip_pool/{date}.json
+feeds:
+  - private:dip_pool      # 首板回调候选池(ma5/atr 已预计算, T-1晚间产出)
+
+# ---- 框架 Mod 参数 ----
+mod:
+  mode: replay            # replay=历史回放 | live=盘中实时
+  poll_interval: 20
+  catchup: true
+  fill_sim: 1.0           # 低吸限价单不适用打板排队抽样(FILL_SIM 语义是
+                          # "涨停排队买不进"); 1.0=关闭抽样
+  fill_seed: 42
+  order_slip: 0.005
