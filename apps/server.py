@@ -779,10 +779,33 @@ def _sim_registry() -> list:
 
 
 def _pid_alive(pid) -> bool:
+    """进程是否存活(跨平台)。
+
+    为何 Windows 不能用 os.kill(pid, 0): Windows 上 os.kill 只认
+    CTRL_C_EVENT/CTRL_BREAK_EVENT, 其余信号一律转成 TerminateProcess ——
+    用 signal 0 探活等于「打开看板就把目标进程杀掉」(实测平台: Windows)。
+    故 nt 分支改走 OpenProcess + GetExitCodeProcess, 不再引入 psutil 依赖。
+    """
     if not pid:
         return False
+    pid = int(pid)
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
     try:
-        os.kill(int(pid), 0)
+        os.kill(pid, 0)
     except Exception:
         return False
     return True
