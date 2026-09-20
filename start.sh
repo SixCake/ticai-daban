@@ -18,7 +18,7 @@ if [ -z "$PY" ]; then
     PY=python3
   fi
 fi
-PORT=${1:-8765}
+PORT=${1:-8766}
 mkdir -p logs
 echo "解释器: $PY ($($PY -V 2>&1))"
 

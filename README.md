@@ -50,7 +50,7 @@ python collect/factor_longtou.py       # 龙头因子日表（qscore/sscore/环�
 > 指向该目录以大幅加速历史段构建，tushare 只负责补尾；未设置则全部走
 > tushare `pro.daily` 逐日全量（注意接口积分与频率限制）。
 
-启动盘中监控平台（默认端口 8765）：
+启动盘中监控平台（默认端口 8766）：
 
 ```bash
 bash start.sh                # poller + 看板服务 + 预警雷达
@@ -58,7 +58,7 @@ bash stop.sh                 # 停止全部
 bash daily_update.sh         # 收盘后增量更新事件库并重跑轨迹标注
 ```
 
-打开 http://localhost:8765 即可看到四页签看板。闭市时 poller/雷达自动休眠（轮询间隔拉长），看板回退展示最近交易日快照。
+打开 http://localhost:8766 即可看到四页签看板。闭市时 poller/雷达自动休眠（轮询间隔拉长），看板回退展示最近交易日快照。
 
 ### 可选：盘前自启（macOS）
 

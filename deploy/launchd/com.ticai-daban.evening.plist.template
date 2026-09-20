@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 题材打板监控平台 · 工作日收盘后数据更新（模板）
+
+本文件是模板, 由 deploy/launchd/install.sh 渲染占位符后写入
+~/Library/LaunchAgents/, 请勿手工编辑安装后的副本（下次 install 会覆盖）。
+
+为什么必须收盘后自动跑: daily_update.sh 增量补齐当日涨停事件/开盘啦题材/
+同花顺榜单/全A日线, 并重建 事件富化 → 题材归属 → 题材日度快照(theme.day)
+→ 复盘快照 → 龙头因子。这些是次日预警雷达 T 级题材信号的静态锚
+(core/theme_signal 的"昨日题材天梯")。若某日漏跑, radar._t_ladder_of 会
+静默降级到更早交易日, 导致驾驶舱"打哪个题材"滞后一天却不报错
+(实测 20260909 漏跑 → 题材天梯停在 0908)。
+
+数据源就绪时刻: 同花顺涨停池当日 16 点后可得, tushare 日线收盘后约 17~18 点
+就绪, 故默认 18:00 触发, 可用 EVENING_AT 调整。
+
+Weekday 1~5 每个交易日收盘后跑; 非交易日/节假日 daily_update.sh 增量拉取
+无新增交易日、幂等空跑, 不产生副作用。
+
+为什么周六(Weekday 6)也要跑: 开盘啦 kpl_list 是 T+1 数据 —— 周五的题材
+标注要到周六才拉得到。若只在周一~周五触发, 周五数据要等下一个周一 18:00
+才被增量补上, 而周一盘中雷达/看板读的"昨日题材天梯"整个交易日都缺最新
+一天(实测 20260918 缺失 → 周一开盘即降级)。故周六单独触发一次, 并默认
+用更晚的时刻(SAT_HOUR/SAT_MINUTE), 给数据源留出更新时间。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL}}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{PROJECT_DIR}}/daily_update.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{{PROJECT_DIR}}</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>{{HOUR}}</integer>
+            <key>Minute</key><integer>{{MINUTE}}</integer>
+        </dict>
+        <dict>
+            <!-- 周六: 补周五的 T+1 题材标注(见文件头说明) -->
+            <key>Weekday</key><integer>6</integer>
+            <key>Hour</key><integer>{{SAT_HOUR}}</integer>
+            <key>Minute</key><integer>{{SAT_MINUTE}}</integer>
+        </dict>
+    </array>
+    <!-- 不在 load 时立即启动: 安装不应立即触发一次全量数据更新 -->
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{{PROJECT_DIR}}/logs/daily_update_launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{PROJECT_DIR}}/logs/daily_update_launchd.log</string>
+</dict>
+</plist>

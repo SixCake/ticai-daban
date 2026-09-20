@@ -23,7 +23,7 @@ GET /api/ai_agent/state → 当前运行态快照(页面加载/断线重连)
 GET /api/ai_factor?date=→ 题材级因子(theme_factor feed, 默认今日)
 POST /api/ai_agent/analyze(SSE) → 手动点新闻即时分析(仅展示, 不落盘)
 
-启动: python apps/server.py [port]  默认8765
+启动: python apps/server.py [port]  默认8766
 """
 import json
 import os
@@ -55,7 +55,7 @@ from core import theme_kb  # noqa: E402  # 题材知识库(剧本全文/档案�
 from apps.ai_feed import _llm_config, save_llm_config  # noqa: E402
 
 WEB = ROOT / "web"
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8766
 
 # 进程级缓存：intraday_px 文件较大，按 mtime 失效
 _ipx_cache: dict = {}

@@ -36,6 +36,8 @@ echo "==> 席位TOP1选股生成+实际收益回填(hmlist.picks)"
 "$PY" build/hm_picks.py || echo "席位选股失败(复盘龙虎榜小节降级隐藏)"
 echo "==> 重建事件富化(一字板/T+1收益)"
 "$PY" build/enrich_events.py
+echo "==> ma5_dip 首板回调候选池(次日私有feed)"
+"$PY" build/build_dip_pool.py || echo "低吸池生成失败(ma5_dip 次日空池不交易)"
 echo "==> 重建题材归属"
 "$PY" build/attribute.py
 echo "==> 重建题材日度快照"
@@ -50,4 +52,9 @@ echo "==> 复盘快照生成(最新交易日)"
 "$PY" apps/review.py || echo "复盘快照生成失败(服务端可现场构建)"
 echo "==> 涨停/触板标的1分钟线采集(东财当日深度, 供研究06)"
 "$PY" collect/fetch_zt_minute.py --max-days 2 || echo "分钟线采集失败(不影响主流程)"
+# 自检必须放在最后: 上面各步都容错(|| echo 降级), 漏跑会静默通过。
+# 这里统一核对目标交易日的关键数据集+策略净值, 有缺口显式打出 !!! 便于告警
+# (实测 20260915~0917 sim 就绪闸超时静默放弃, 策略净值凭空缺失无人察觉)。
+echo "==> 收盘后数据完整性自检"
+"$PY" build/check_daily.py || echo "!!! 数据自检未通过: 上方 MISS 项需人工确认(采集延迟或漏跑)"
 echo "==> 完成"

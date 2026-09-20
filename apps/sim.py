@@ -43,6 +43,13 @@ REGISTRY = STRAT_DIR / "strategies.yaml"
 SIM_ROOT = DATA / "sim"
 LOG_DIR = SIM_ROOT / "logs"
 RUNS_DIR = SIM_ROOT / "runs"
+LIVE = DATA / "live"
+
+# live 就绪闸: 拉起策略前等雷达落盘今日盘中快照的最长等待与轮询间隔。
+# 雷达 cycle=20s, 竞价 09:25 落盘; QMT 降级时预热实测约 16 分钟, 故超时
+# 取 30 分钟覆盖「盘前启动」+「预热慢」两种情况(见 main() 就绪闸注释)。
+READY_TIMEOUT_SEC = 1800
+READY_POLL_SEC = 20
 
 # rqalpha 的 sys_analyser 会 import matplotlib; 默认 MPLCONFIGDIR(~/.matplotlib)
 # 在无写权限环境下每次启动都刷一屏告警并重建字体缓存, 指到项目 logs 下消噪。
@@ -78,14 +85,30 @@ def write_meta(run_dir: Path, **fields) -> dict:
 
 
 def seed_from_run(seed_run_id: str):
-    """以某次回测的结束状态作为模拟起点: 结束持仓(数量) + 结束现金。
+    """以某次回测/模拟的结束状态作为起点: 结束持仓(数量) + 结束现金。
 
     rqalpha 的 init_positions 只收 {code: 数量}, 成本取继承日前收盘
     (portfolio/account.py 实测), 故继承持仓的均价会被重置为前收盘 ——
     引擎约束, 看板新建模拟表单里已注明。
+
+    为何优先读 state 快照: positions.parquet 只在有持仓的日子落行, 空仓日
+    不落行 → 直接取 positions 的 max(date) 会拿到更早交易日的持仓, 与
+    equity 末行的现金凑成「跨日错配」(实测 20260918 误继承 0911 的持仓,
+    而 0914 已清仓)。state/{date}.json 是每日结算快照, 持仓与现金同日,
+    取最新一份即为上一交易日结束状态。
     返回 (init_positions, cash, 持仓截止日)。"""
     import pandas as pd
     rd = run_dir_of(seed_run_id)
+    st_dir = rd / "state"
+    if st_dir.exists():
+        snaps = sorted(st_dir.glob("*.json"))
+        if snaps:
+            d = json.loads(snaps[-1].read_text(encoding="utf-8"))
+            positions = {str(p["code"]): int(float(p["qty"]))
+                         for p in (d.get("positions") or [])
+                         if float(p.get("qty") or 0) > 0}
+            return positions, round(float(d["cash"]), 2), str(d["date"])
+    # 回退: 无 state 快照(早期 run) 时按持仓/净值记录推断
     pf, ef = rd / "positions.parquet", rd / "equity.parquet"
     if not pf.exists() or not ef.exists():
         raise ValueError(f"{seed_run_id} 缺持仓/净值记录, 不能作模拟起点")
@@ -432,6 +455,49 @@ def launch(name: str, args, run_id: str) -> subprocess.Popen:
     return p
 
 
+# ---------- live 就绪闸(防启动竞态) ----------
+
+def _intraday_partition_ready(day: str) -> bool:
+    """今日盘中快照分区 intraday_px_{day}.json 是否已落盘且非空。
+
+    sim live 的 rqalpha 启动校验(_adjust_start_date)走 data_source.
+    available_data_range("1m") → intraday_px 已有分区的首末日。分区缺失
+    时末日停在上一交易日, 而 live 的 start=end=today → start>end →
+    get_trading_dates 返回空 → 报 "There is no data between today and
+    today"(实测 20260914 启动竞态: sim 11:00 抢跑, 雷达 11:21 才落盘)。"""
+    f = LIVE / f"intraday_px_{day}.json"
+    if not f.exists():
+        return False
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return False        # 雷达正在写(半截 JSON) → 视为未就绪, 下轮再探
+    return bool(d)          # 非空(至少一只票有分时点)才算就绪
+
+
+def _is_trade_day(day: str) -> bool:
+    """今日是否交易日(查 meta.trade_cal)。读取失败保守返回 True(不阻断拉起)。"""
+    try:
+        import pandas as pd
+        from datastore import path_of
+        cal = pd.read_parquet(path_of("meta.trade_cal"))
+        open_days = set(cal[cal["is_open"] == 1]["cal_date"].astype(str))
+        return str(day) in open_days
+    except Exception:
+        return True
+
+
+def wait_intraday_ready(day: str) -> bool:
+    """退避等待雷达落盘今日盘中快照。就绪返回 True; 超时返回 False。"""
+    t0 = time.time()
+    while True:
+        if _intraday_partition_ready(day):
+            return True
+        if time.time() - t0 >= READY_TIMEOUT_SEC:
+            return False
+        time.sleep(READY_POLL_SEC)
+
+
 def migrate_legacy() -> int:
     """一次性把 run 目录模型之前的每策略累积数据迁到 runs/{name}__main。
 
@@ -524,6 +590,24 @@ def main() -> int:
     else:
         args.start = args.start or today
         args.end = args.end or today
+
+    # ---- live 就绪闸: 等雷达落盘今日盘中快照再拉起(防启动竞态) ----
+    # 为何必需: sim 与 radar 由 start.sh 同时拉起, 而 sim live 以 today 跑
+    # 策略, rqalpha 校验走 intraday_px 分区首末日(见 _intraday_partition_ready
+    # 注释)。盘前启动或雷达预热慢(QMT 降级)时今日分区尚未落盘 → 抢跑必报
+    # no-data。故拉起前退避等待; 就绪/盘后重启(分区已在)则 0 等待。
+    # 仅 live 需要(replay 读历史分区, 不依赖今日); 非交易日不空等。
+    if args.mode == "live" and not _intraday_partition_ready(args.start):
+        if not _is_trade_day(args.start):
+            print(f"[sim] {args.start} 非交易日, 雷达不产出盘中快照, 跳过拉起")
+            return 0
+        print(f"[sim] 今日盘中快照 {args.start} 未就绪, 等待雷达落盘"
+              f"(最长 {READY_TIMEOUT_SEC // 60} 分钟, 每 {READY_POLL_SEC}s 探测)...")
+        if not wait_intraday_ready(args.start):
+            print(f"[sim] 等待超时: 雷达未落盘 intraday_px_{args.start}.json, "
+                  f"放弃拉起(避免抢跑 no-data)。请确认雷达在运行。")
+            return 1
+        print("[sim] 今日盘中快照已就绪, 继续拉起")
 
     # ---- 拉起 ----
     targets = []
